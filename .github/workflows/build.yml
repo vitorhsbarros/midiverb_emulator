@@ -17,30 +17,44 @@ jobs:
       - name: Configure
         run: |
           cd MidiverbPlugin
-          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake -B build -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=10.13
 
       - name: Build
         run: |
           cd MidiverbPlugin
           cmake --build build --config Release -j$(sysctl -n hw.ncpu)
 
-      - name: Upload AU
-        uses: actions/upload-artifact@v4
-        with:
-          name: Midiverb-Emulator-AU
-          path: MidiverbPlugin/build/MidiverbPlugin_artefacts/Release/AU/*.component
+      - name: Sign (ad-hoc) and package
+        run: |
+          ART="MidiverbPlugin/build/MidiverbPlugin_artefacts/Release"
+          mkdir -p dist
+          for b in "$ART"/VST3/*.vst3 "$ART"/AU/*.component "$ART"/Standalone/*.app; do
+            codesign --force --deep --sign - "$b"
+            lipo -info "$(find "$b/Contents/MacOS" -type f | head -1)"
+          done
+          ditto -c -k --keepParent "$ART"/VST3/*.vst3 dist/Midiverb-Emulator-macOS.vst3.zip
+          ditto -c -k --keepParent "$ART"/AU/*.component dist/Midiverb-Emulator-macOS.component.zip
+          ditto -c -k --keepParent "$ART"/Standalone/*.app dist/Midiverb-Emulator-macOS.app.zip
 
       - name: Upload VST3
         uses: actions/upload-artifact@v4
         with:
           name: Midiverb-Emulator-VST3-macOS
-          path: MidiverbPlugin/build/MidiverbPlugin_artefacts/Release/VST3/*.vst3
+          path: dist/Midiverb-Emulator-macOS.vst3.zip
+
+      - name: Upload AU
+        uses: actions/upload-artifact@v4
+        with:
+          name: Midiverb-Emulator-AU-macOS
+          path: dist/Midiverb-Emulator-macOS.component.zip
 
       - name: Upload Standalone
         uses: actions/upload-artifact@v4
         with:
           name: Midiverb-Emulator-Standalone-macOS
-          path: MidiverbPlugin/build/MidiverbPlugin_artefacts/Release/Standalone/*.app
+          path: dist/Midiverb-Emulator-macOS.app.zip
 
   build-linux:
     runs-on: ubuntu-latest
