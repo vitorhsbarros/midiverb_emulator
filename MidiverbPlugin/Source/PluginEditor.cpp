@@ -147,12 +147,16 @@ void UnitKnobLookAndFeel::drawRotarySlider(juce::Graphics& g, int x, int y, int 
 //==============================================================================
 UnitPanel::UnitPanel(MidiverbAudioProcessor& p) : processor(p)
 {
-    for (auto* knob : { &mixKnob, &feedbackKnob })
+    for (auto* knob : { &inputKnob, &mixKnob, &feedbackKnob, &outputKnob })
     {
         knob->setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
         knob->setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
         knob->setLookAndFeel(&knobLook);
         knob->setMouseDragSensitivity(180);
+        addAndMakeVisible(knob);
+    }
+    for (auto* knob : { &mixKnob, &feedbackKnob })
+    {
         knob->onValueChange = [this, knob]
         {
             if (knob->isMouseButtonDown())
@@ -162,17 +166,28 @@ UnitPanel::UnitPanel(MidiverbAudioProcessor& p) : processor(p)
                 repaint();
             }
         };
-        addAndMakeVisible(knob);
+    }
+    // The gain knobs show their value in dB in a bubble while turning
+    for (auto* knob : { &inputKnob, &outputKnob })
+    {
+        knob->setPopupDisplayEnabled(true, true, this);
+        knob->setDoubleClickReturnValue(true, 0.0);
     }
     mixKnob.setDoubleClickReturnValue(true, 0.5);
     feedbackKnob.setDoubleClickReturnValue(true, 0.0);
     mixKnob.setTooltip("Mix (dry/wet)");
     feedbackKnob.setTooltip("Feedback");
+    inputKnob.setTooltip("Input gain into the converter. Drive it until the clip LED just flickers.");
+    outputKnob.setTooltip("Output trim of the wet signal");
 
     mixAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         processor.getAPVTS(), "dryWet", mixKnob);
     feedbackAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         processor.getAPVTS(), "feedback", feedbackKnob);
+    inputAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        processor.getAPVTS(), "inputGain", inputKnob);
+    outputAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        processor.getAPVTS(), "outputGain", outputKnob);
 
     setSize(logicalWidth, logicalHeight);
     refresh(false);
@@ -180,8 +195,8 @@ UnitPanel::UnitPanel(MidiverbAudioProcessor& p) : processor(p)
 
 UnitPanel::~UnitPanel()
 {
-    mixKnob.setLookAndFeel(nullptr);
-    feedbackKnob.setLookAndFeel(nullptr);
+    for (auto* knob : { &inputKnob, &mixKnob, &feedbackKnob, &outputKnob })
+        knob->setLookAndFeel(nullptr);
 }
 
 int UnitPanel::currentDevice() const
@@ -311,8 +326,10 @@ void UnitPanel::layout()
             hits.push_back({ { 690.0f + 42.0f * (float) (k % 5), (k < 5 ? 506.0f : 546.0f), 34.0f, 28.0f },
                              HitType::Key, k });
 
-        mixKnob.setBounds(338, 510, 60, 60);
-        feedbackKnob.setBounds(420, 510, 60, 60);
+        inputKnob.setBounds(298, 516, 46, 46);
+        mixKnob.setBounds(348, 516, 46, 46);
+        feedbackKnob.setBounds(398, 516, 46, 46);
+        outputKnob.setBounds(448, 516, 46, 46);
     }
     else
     {
@@ -325,8 +342,10 @@ void UnitPanel::layout()
         hits.push_back({ { 378.0f, 534.0f, 42.0f, 30.0f }, HitType::Down, 0 });
         hits.push_back({ { 436.0f, 534.0f, 42.0f, 30.0f }, HitType::Up, 0 });
 
-        mixKnob.setBounds(640, 522, 60, 60);
-        feedbackKnob.setBounds(740, 522, 60, 60);
+        inputKnob.setBounds(500, 522, 60, 60);
+        mixKnob.setBounds(582, 522, 60, 60);
+        feedbackKnob.setBounds(664, 522, 60, 60);
+        outputKnob.setBounds(746, 522, 60, 60);
     }
 }
 
@@ -675,8 +694,10 @@ void UnitPanel::paintDesktopUnit(juce::Graphics& g, bool isMidifex)
 
     paintDisplay(g, { 256.0f, 532.0f, 88.0f, 48.0f });
 
+    paintKnobLabel(g, inputKnob, "INPUT", printWhite, false);
     paintKnobLabel(g, mixKnob, "MIX", printWhite, false);
     paintKnobLabel(g, feedbackKnob, "FEEDBACK", printWhite, false);
+    paintKnobLabel(g, outputKnob, "OUTPUT", printWhite, false);
 }
 
 //------------------------------------------------------------------------------
@@ -779,8 +800,10 @@ void UnitPanel::paintRackUnit(juce::Graphics& g)
     g.fillRect(74.0f, 576.0f, sub.getBounds().getWidth() + 4.0f, 1.0f);
 
     // Knobs
+    paintKnobLabel(g, inputKnob, "INPUT", printWhite, true);
     paintKnobLabel(g, mixKnob, "MIX", printWhite, true);
     paintKnobLabel(g, feedbackKnob, "FEEDBACK", printWhite, true);
+    paintKnobLabel(g, outputKnob, "OUTPUT", printWhite, true);
 
     // Clip LED and display
     paintLed(g, { 512.0f, 520.0f }, ledRed, shownOverload);
