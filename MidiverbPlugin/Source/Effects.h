@@ -31,7 +31,7 @@ struct DeviceInfo {
     const char** effectNames;
     EffectFn* effects;
     double sampleRate;    // DSP sample rate of the original unit
-    bool modelledAnalog;  // true: schematic-derived converter filters, false: generic filters
+    int analogModel;      // 0: MIDIVerb/MIDIFex schematic model, 1: MIDIVerb II estimate
     bool adc12bit;        // true: 12-bit SAR ADC, LSB of the 13-bit DSP input always 0
 };
 
@@ -41,9 +41,9 @@ struct DeviceInfo {
 //  but the delay programs only match their names at this rate (e.g. #89 "460 Msec" is
 //  14063 samples = 450 ms), and the converter filters sit just below its 15.6 kHz Nyquist.
 static const DeviceInfo devices[] = {
-    { "MIDIVerb",   64,  1, names_midiverb,  midiverb_effects,  23437.5, true,  true  },
-    { "MidiFex",    64,  1, names_midifex,   midifex_effects,   23437.5, true,  true  },
-    { "MIDIVerb 2", 100, 0, names_midiverb2, midiverb2_effects, 31250.0, false, false },
+    { "MIDIVerb",   64,  1, names_midiverb,  midiverb_effects,  23437.5, 0, true  },
+    { "MidiFex",    64,  1, names_midifex,   midifex_effects,   23437.5, 0, true  },
+    { "MIDIVerb 2", 100, 0, names_midiverb2, midiverb2_effects, 31250.0, 1, false },
 };
 
 static constexpr int NUM_DEVICES = 3;

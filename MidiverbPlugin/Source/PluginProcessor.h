@@ -188,7 +188,6 @@ private:
     int oversampling = 4;
     double internalRate = 192000.0;
     double phase = 0.0;           // Fractional position in effect sample stream
-    double prevHostInput = 0.0;   // for linear upsampling host -> internal
     double prevAnalogIn = 0.0;    // previous internal-rate sample after the input filter
     double heldL = 0.0, heldR = 0.0;  // DAC sample-and-hold outputs
 
@@ -198,10 +197,12 @@ private:
     analog::Chain<4> inputModel;
     analog::Chain<2> outputModelL, outputModelR;
 
-    // Generic filters for units without a model (MIDIVerb II)
-    LowpassFilter8 genericInput, genericOutputL, genericOutputR;
+    // MIDIVerb II (estimated model)
+    analog::Chain<3> mv2Input;
+    analog::Chain<3> mv2OutputL, mv2OutputR;
 
-    // Decimation internal -> host
+    // Interpolation host -> internal, decimation internal -> host
+    LowpassFilter8 interpolateIn;
     LowpassFilter8 decimateL, decimateR;
 
     // Input overload detection

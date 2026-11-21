@@ -126,13 +126,13 @@ void MidiverbAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBloc
     outputModelL.design(analog::midiverbOutput(), internalRate);
     outputModelR.design(analog::midiverbOutput(), internalRate);
 
-    // MIDIVerb II: no faithful model yet, generic filters just below its 15.6 kHz Nyquist
-    genericInput.setCutoff(internalRate, 14000.0);
-    genericOutputL.setCutoff(internalRate, 14000.0);
-    genericOutputR.setCutoff(internalRate, 14000.0);
+    mv2Input.design(analog::midiverb2Input(), internalRate);
+    mv2OutputL.design(analog::midiverb2Output(), internalRate);
+    mv2OutputR.design(analog::midiverb2Output(), internalRate);
 
     const double decimationCutoff = juce::jmin(20000.0, 0.45 * sampleRate);
     decimateL.setCutoff(internalRate, decimationCutoff);
+    interpolateIn.setCutoff(internalRate, decimationCutoff);
     decimateR.setCutoff(internalRate, decimationCutoff);
 
     resetSignalState();
@@ -143,12 +143,12 @@ void MidiverbAudioProcessor::resetSignalState()
     inputModel.reset();
     outputModelL.reset();
     outputModelR.reset();
-    genericInput.reset();
-    genericOutputL.reset();
-    genericOutputR.reset();
+    mv2Input.reset();
+    mv2OutputL.reset();
+    mv2OutputR.reset();
     decimateL.reset();
     decimateR.reset();
-    prevHostInput = 0.0;
+    interpolateIn.reset();
     prevAnalogIn = 0.0;
     heldL = heldR = 0.0;
 
@@ -212,7 +212,7 @@ void MidiverbAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
         {
             // Different converter filters: start them from silence
             inputModel.reset(); outputModelL.reset(); outputModelR.reset();
-            genericInput.reset(); genericOutputL.reset(); genericOutputR.reset();
+            mv2Input.reset(); mv2OutputL.reset(); mv2OutputR.reset();
             prevAnalogIn = 0.0;
             heldL = heldR = 0.0;
         }
@@ -242,10 +242,9 @@ void MidiverbAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
     float equalPowerDry = std::cos(angle);
     float equalPowerWet = std::sin(angle);
 
-    const bool modelled = dev.modelledAnalog;
+    const bool mv1Model = dev.analogModel == 0;
     const bool adc12bit = dev.adc12bit;
     const double phaseIncrement = dev.sampleRate / internalRate;
-    const double osInv = 1.0 / oversampling;
 
     for (int i = 0; i < numSamples; i++)
     {
@@ -258,9 +257,12 @@ void MidiverbAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
         double wetL = 0.0, wetR = 0.0;
         for (int k = 1; k <= oversampling; ++k)
         {
-            // Upsample linearly to the internal rate, then the input (anti-alias) filter
-            const double x = prevHostInput + (monoIn - prevHostInput) * (k * osInv);
-            const double analogIn = modelled ? inputModel.process(x) : genericInput.process(x);
+            // Upsample to the internal rate (zero-stuffing + interpolation filter),
+            // then the input (anti-alias) filter
+            const double x = oversampling > 1
+                ? interpolateIn.process(k == 1 ? monoIn * oversampling : 0.0)
+                : monoIn;
+            const double analogIn = mv1Model ? inputModel.process(x) : mv2Input.process(x);
 
             // Keep last value of the DAC hold for the part of this internal sample before an update
             double boxL = heldL, boxR = heldR;
@@ -282,9 +284,9 @@ void MidiverbAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
                 if (adc12bit)
                 {
                     // 12-bit successive approximation (truncating), shifted left one bit
-                    // into the 13-bit DSP input range
-                    const int code = juce::jlimit(-2048, 2047, (int) std::floor(clipped * 2048.0f));
-                    inputInt = static_cast<int16_t>(code * 2);
+                    // into the 13-bit DSP input range; bit 0 reads as 1 (as in MAME's driver)
+                    const int code = juce::jlimit(-2048, 2047, (int) std::floor(clipped * 2047.0f));
+                    inputInt = static_cast<int16_t>(code * 2 + 1);
                 }
                 else
                 {
@@ -306,6 +308,12 @@ void MidiverbAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
                     }
                 }
 
+                if (adc12bit)
+                {
+                    // 13-bit DAC with saturation logic
+                    outLeftInt = static_cast<int16_t>(juce::jlimit<int>(-4095, 4095, outLeftInt));
+                    outRightInt = static_cast<int16_t>(juce::jlimit<int>(-4095, 4095, outRightInt));
+                }
                 const double newL = outLeftInt / static_cast<double>(0x0fff);
                 const double newR = outRightInt / static_cast<double>(0x0fff);
 
@@ -319,8 +327,8 @@ void MidiverbAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
             prevAnalogIn = analogIn;
 
             // Output (reconstruction) filter, then decimation filter
-            double yL = modelled ? outputModelL.process(boxL) : genericOutputL.process(boxL);
-            double yR = modelled ? outputModelR.process(boxR) : genericOutputR.process(boxR);
+            double yL = mv1Model ? outputModelL.process(boxL) : mv2OutputL.process(boxL);
+            double yR = mv1Model ? outputModelR.process(boxR) : mv2OutputR.process(boxR);
             if (oversampling > 1)
             {
                 yL = decimateL.process(yL);
@@ -329,7 +337,6 @@ void MidiverbAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
             wetL = yL;
             wetR = yR;
         }
-        prevHostInput = monoIn;
 
         // Store for feedback
         lastWetL = wetL;
