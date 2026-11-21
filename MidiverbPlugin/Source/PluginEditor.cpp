@@ -1,67 +1,855 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 
-MidiverbAudioProcessorEditor::MidiverbAudioProcessorEditor(MidiverbAudioProcessor& p)
-    : AudioProcessorEditor(&p), audioProcessor(p)
+namespace
 {
-    // Device selector
-    deviceLabel.setText("Device", juce::dontSendNotification);
-    deviceLabel.setJustificationType(juce::Justification::centred);
-    addAndMakeVisible(deviceLabel);
+    using juce::Colour;
+    using juce::Rectangle;
 
-    for (int i = 0; i < MidiverbAudioProcessor::NUM_DEVICES; ++i)
-        deviceSelector.addItem(MidiverbAudioProcessor::getDeviceName(i), i + 1);
+    enum Device { MIDIVERB = 0, MIDIFEX = 1, MIDIVERB2 = 2 };
 
-    addAndMakeVisible(deviceSelector);
+    const Colour studioTop   { 0xff1d1d20 };
+    const Colour studioBot   { 0xff0b0b0c };
+    const Colour printWhite  { 0xffe9e9e4 };
+    const Colour printGrey   { 0xff9a9a96 };
+    const Colour verbBlue    { 0xff5ab4e6 };
+    const Colour fexGold     { 0xffdda23a };
+    const Colour verb2Blue   { 0xff3f96dc };
+    const Colour ledRed      { 0xffff3b22 };
+    const Colour keyOrange   { 0xffd98a2b };
 
-    deviceAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
-        audioProcessor.getAPVTS(), "device", deviceSelector);
+    Colour accentFor(int device)
+    {
+        switch (device)
+        {
+            case MIDIFEX:   return fexGold;
+            case MIDIVERB2: return verb2Blue;
+            default:        return verbBlue;
+        }
+    }
 
-    // Program selector (manually managed due to variable effect counts per device)
-    programLabel.setText("Program", juce::dontSendNotification);
-    programLabel.setJustificationType(juce::Justification::centred);
-    addAndMakeVisible(programLabel);
-    addAndMakeVisible(programSelector);
+    juce::Font font(float height, bool bold = false)
+    {
+        return juce::Font(juce::FontOptions(height, bold ? juce::Font::bold : juce::Font::plain));
+    }
 
-    // Manual onChange handler - ComboBox ID equals effect index + 1
-    programSelector.onChange = [this]() {
-        int effectIndex = programSelector.getSelectedId() - 1;
-        if (effectIndex >= 0) {
-            auto* param = audioProcessor.getAPVTS().getParameter("program");
-            param->setValueNotifyingHost(param->convertTo0to1(static_cast<float>(effectIndex)));
+    // Text as a path with a forward slant, baseline at y = 0.
+    juce::Path slantedText(const juce::String& text, float height, float slant)
+    {
+        juce::GlyphArrangement ga;
+        ga.addLineOfText(font(height, true), text, 0.0f, 0.0f);
+        juce::Path p;
+        ga.createPath(p);
+        p.applyTransform(juce::AffineTransform::shear(-slant, 0.0f));
+        return p;
+    }
+
+    // Seven-segment glyphs, bit 0 = segment a ... bit 6 = segment g.
+    juce::uint8 segmentsFor(juce::juce_wchar c)
+    {
+        static const juce::uint8 digits[10] = { 0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F };
+        if (c >= '0' && c <= '9') return digits[c - '0'];
+        if (c == '-') return 0x40;
+        return 0;
+    }
+
+    juce::Path segmentPath(Rectangle<float> r, juce::uint8 mask)
+    {
+        const float w = r.getWidth(), h = r.getHeight();
+        const float t = w * 0.19f, gap = t * 0.14f, half = h * 0.5f;
+        const Rectangle<float> seg[7] = {
+            { t * 0.5f, 0.0f, w - t, t },                          // a
+            { w - t, t * 0.5f, t, half - t * 0.5f },               // b
+            { w - t, half, t, half - t * 0.5f },                   // c
+            { t * 0.5f, h - t, w - t, t },                         // d
+            { 0.0f, half, t, half - t * 0.5f },                    // e
+            { 0.0f, t * 0.5f, t, half - t * 0.5f },                // f
+            { t * 0.5f, half - t * 0.5f, w - t, t },               // g
+        };
+        juce::Path p;
+        for (int i = 0; i < 7; ++i)
+            if (mask & (1 << i))
+                p.addRoundedRectangle(seg[i].reduced(gap), t * 0.4f);
+        // Slight forward lean, like the real displays.
+        p.applyTransform(juce::AffineTransform::shear(-0.08f, 0.0f).translated(r.getX() + h * 0.08f, r.getY()));
+        return p;
+    }
+
+    void drawScrews(juce::Graphics& g, Rectangle<float> r, float inset)
+    {
+        const juce::Point<float> pts[] = {
+            { r.getX() + inset, r.getY() + inset }, { r.getRight() - inset, r.getY() + inset },
+            { r.getX() + inset, r.getBottom() - inset }, { r.getRight() - inset, r.getBottom() - inset },
+            { r.getCentreX(), r.getY() + inset }, { r.getCentreX(), r.getBottom() - inset },
+        };
+        for (auto p : pts)
+        {
+            auto s = Rectangle<float>(7.0f, 7.0f).withCentre(p);
+            g.setColour(Colour(0xff050505));
+            g.fillEllipse(s.expanded(1.0f));
+            g.setGradientFill(juce::ColourGradient(Colour(0xff4a4a4c), s.getX(), s.getY(),
+                                                   Colour(0xff1a1a1b), s.getRight(), s.getBottom(), false));
+            g.fillEllipse(s);
+            g.setColour(Colour(0xff0a0a0a));
+            g.drawLine(s.getX() + 1.5f, s.getCentreY(), s.getRight() - 1.5f, s.getCentreY(), 1.2f);
+        }
+    }
+}
+
+//==============================================================================
+void UnitKnobLookAndFeel::drawRotarySlider(juce::Graphics& g, int x, int y, int width, int height,
+                                           float pos, float startAngle, float endAngle, juce::Slider&)
+{
+    auto bounds = juce::Rectangle<float>((float) x, (float) y, (float) width, (float) height);
+    const float radius = juce::jmin(bounds.getWidth(), bounds.getHeight()) * 0.5f - 7.0f;
+    const auto c = bounds.getCentre();
+
+    // Scale dots
+    g.setColour(printGrey);
+    for (int i = 0; i <= 10; ++i)
+    {
+        const float a = startAngle + (endAngle - startAngle) * (float) i / 10.0f;
+        const auto p = c.getPointOnCircumference(radius + 4.5f, a);
+        g.fillEllipse(p.x - 0.9f, p.y - 0.9f, 1.8f, 1.8f);
+    }
+
+    // Shadow
+    g.setColour(juce::Colours::black.withAlpha(0.6f));
+    g.fillEllipse(Rectangle<float>(radius * 2.0f, radius * 2.0f).withCentre(c.translated(0.0f, 2.0f)));
+
+    // Knurled skirt
+    auto skirt = Rectangle<float>(radius * 2.0f, radius * 2.0f).withCentre(c);
+    g.setColour(Colour(0xff0f0f10));
+    g.fillEllipse(skirt);
+    g.setColour(Colour(0xff2b2b2d));
+    for (int i = 0; i < 36; ++i)
+    {
+        const float a = juce::MathConstants<float>::twoPi * (float) i / 36.0f;
+        g.drawLine(juce::Line<float>(c.getPointOnCircumference(radius * 0.80f, a),
+                                     c.getPointOnCircumference(radius * 0.98f, a)), 1.0f);
+    }
+
+    // Cap
+    auto cap = skirt.reduced(radius * 0.24f);
+    g.setGradientFill(juce::ColourGradient(Colour(0xff3c3c3f), cap.getX(), cap.getY(),
+                                           Colour(0xff141415), cap.getRight(), cap.getBottom(), false));
+    g.fillEllipse(cap);
+    g.setColour(Colour(0x30ffffff));
+    g.drawEllipse(cap, 0.8f);
+
+    // Pointer
+    const float angle = startAngle + pos * (endAngle - startAngle);
+    g.setColour(printWhite);
+    g.drawLine(juce::Line<float>(c.getPointOnCircumference(radius * 0.25f, angle),
+                                 c.getPointOnCircumference(radius * 0.95f, angle)), 2.2f);
+}
+
+//==============================================================================
+UnitPanel::UnitPanel(MidiverbAudioProcessor& p) : processor(p)
+{
+    for (auto* knob : { &mixKnob, &feedbackKnob })
+    {
+        knob->setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
+        knob->setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
+        knob->setLookAndFeel(&knobLook);
+        knob->setMouseDragSensitivity(180);
+        knob->onValueChange = [this, knob]
+        {
+            if (knob->isMouseButtonDown())
+            {
+                knobValueShown = juce::roundToInt(knob->getValue() * 99.0);
+                knobValueSince = juce::Time::getMillisecondCounter();
+                repaint();
+            }
+        };
+        addAndMakeVisible(knob);
+    }
+    mixKnob.setDoubleClickReturnValue(true, 0.5);
+    feedbackKnob.setDoubleClickReturnValue(true, 0.0);
+    mixKnob.setTooltip("Mix (dry/wet)");
+    feedbackKnob.setTooltip("Feedback");
+
+    mixAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        processor.getAPVTS(), "dryWet", mixKnob);
+    feedbackAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        processor.getAPVTS(), "feedback", feedbackKnob);
+
+    setSize(logicalWidth, logicalHeight);
+    refresh(false);
+}
+
+UnitPanel::~UnitPanel()
+{
+    mixKnob.setLookAndFeel(nullptr);
+    feedbackKnob.setLookAndFeel(nullptr);
+}
+
+int UnitPanel::currentDevice() const
+{
+    return juce::jlimit(0, MidiverbAudioProcessor::NUM_DEVICES - 1,
+                        (int) *processor.getAPVTS().getRawParameterValue("device"));
+}
+
+int UnitPanel::currentProgram() const
+{
+    return (int) *processor.getAPVTS().getRawParameterValue("program");
+}
+
+void UnitPanel::setIntParam(const juce::String& id, int value)
+{
+    if (auto* param = processor.getAPVTS().getParameter(id))
+    {
+        param->beginChangeGesture();
+        param->setValueNotifyingHost(param->convertTo0to1((float) value));
+        param->endChangeGesture();
+    }
+}
+
+void UnitPanel::selectProgram(int index)
+{
+    const int n = MidiverbAudioProcessor::getDeviceNumEffects(currentDevice());
+    setIntParam("program", juce::jlimit(0, n - 1, index));
+    knobValueShown = -1;
+    refresh(false);
+}
+
+void UnitPanel::step(int delta)
+{
+    const int device = currentDevice();
+    // On the desktop units the last slot is DEFEAT, reached with its own button.
+    const int last = MidiverbAudioProcessor::getDeviceNumEffects(device) - (device == MIDIVERB2 ? 1 : 2);
+    int p = currentProgram();
+    if (device != MIDIVERB2 && p > last)
+        p = programBeforeDefeat;
+    p += delta;
+    if (p < 0) p = last;
+    if (p > last) p = 0;
+    pendingDigit = -1;
+    selectProgram(p);
+}
+
+void UnitPanel::pressKey(int digit)
+{
+    const auto now = juce::Time::getMillisecondCounter();
+    if (pendingDigit >= 0 && now - pendingSince < 2500)
+    {
+        const int value = pendingDigit * 10 + digit;
+        pendingDigit = -1;
+        selectProgram(value);
+    }
+    else
+    {
+        pendingDigit = digit;
+        pendingSince = now;
+        knobValueShown = -1;
+        repaint();
+    }
+}
+
+void UnitPanel::refresh(bool overload)
+{
+    const int device = currentDevice();
+    const int n = MidiverbAudioProcessor::getDeviceNumEffects(device);
+    int program = currentProgram();
+    if (program >= n)
+    {
+        program = 0;
+        setIntParam("program", program);
+    }
+
+    bool needsRepaint = false;
+    if (device != shownDevice)
+    {
+        shownDevice = device;
+        pendingDigit = -1;
+        layout();
+        needsRepaint = true;
+    }
+    if (program != shownProgram) { shownProgram = program; needsRepaint = true; }
+    const auto now = juce::Time::getMillisecondCounter();
+    if (overload) overloadSince = now;
+    const bool clipLit = overloadSince != 0 && now - overloadSince < 250;
+    if (clipLit != shownOverload) { shownOverload = clipLit; needsRepaint = true; }
+
+    if (pendingDigit >= 0)
+    {
+        if (now - pendingSince >= 2500) pendingDigit = -1;
+        needsRepaint = true;   // blinking
+    }
+    if (knobValueShown >= 0 && now - knobValueSince >= 1200)
+    {
+        knobValueShown = -1;
+        needsRepaint = true;
+    }
+
+    if (needsRepaint)
+        repaint();
+}
+
+//==============================================================================
+// Layout: hit areas and knob positions for the current unit.
+
+void UnitPanel::layout()
+{
+    hits.clear();
+    hasPressed = false;
+
+    for (int d = 0; d < MidiverbAudioProcessor::NUM_DEVICES; ++d)
+        hits.push_back({ { 30.0f + 150.0f * (float) d, 10.0f, 144.0f, 28.0f }, HitType::Tab, d });
+
+    const int device = shownDevice;
+    if (device == MIDIVERB2)
+    {
+        const float x0 = 50.0f, y0 = 84.0f, colW = 172.0f, rowH = 17.2f;
+        for (int i = 0; i < 100; ++i)
+            hits.push_back({ { x0 + colW * (float) (i / 20), y0 + rowH * (float) (i % 20), colW, rowH },
+                             HitType::Program, i });
+
+        hits.push_back({ { 628.0f, 506.0f, 36.0f, 28.0f }, HitType::Up, 0 });
+        hits.push_back({ { 628.0f, 546.0f, 36.0f, 28.0f }, HitType::Down, 0 });
+        for (int k = 0; k < 10; ++k)
+            hits.push_back({ { 690.0f + 42.0f * (float) (k % 5), (k < 5 ? 506.0f : 546.0f), 34.0f, 28.0f },
+                             HitType::Key, k });
+
+        mixKnob.setBounds(338, 510, 60, 60);
+        feedbackKnob.setBounds(420, 510, 60, 60);
+    }
+    else
+    {
+        const float x0 = 60.0f, y0 = 160.0f, colW = 280.0f, rowH = 15.6f;
+        for (int i = 0; i < 63; ++i)
+            hits.push_back({ { x0 + colW * (float) (i / 21), y0 + rowH * (float) (i % 21), colW, rowH },
+                             HitType::Program, i });
+
+        hits.push_back({ { 150.0f, 534.0f, 42.0f, 30.0f }, HitType::Defeat, 0 });
+        hits.push_back({ { 378.0f, 534.0f, 42.0f, 30.0f }, HitType::Down, 0 });
+        hits.push_back({ { 436.0f, 534.0f, 42.0f, 30.0f }, HitType::Up, 0 });
+
+        mixKnob.setBounds(640, 522, 60, 60);
+        feedbackKnob.setBounds(740, 522, 60, 60);
+    }
+}
+
+const UnitPanel::Hit* UnitPanel::hitAt(juce::Point<float> p) const
+{
+    for (const auto& h : hits)
+        if (h.area.contains(p))
+            return &h;
+    return nullptr;
+}
+
+bool UnitPanel::isPressed(HitType type, int value) const
+{
+    return hasPressed && pressedCopy.type == type && pressedCopy.value == value;
+}
+
+void UnitPanel::mouseDown(const juce::MouseEvent& e)
+{
+    if (e.mods.isPopupMenu())
+    {
+        juce::PopupMenu menu;
+        menu.addItem(1, juce::String("Build: ") + __DATE__ + " " + __TIME__, false);
+        menu.showMenuAsync(juce::PopupMenu::Options());
+        return;
+    }
+
+    const auto* h = hitAt(e.position);
+    if (h == nullptr)
+        return;
+
+    pressedCopy = *h;
+    hasPressed = true;
+
+    switch (h->type)
+    {
+        case HitType::Tab:
+            if (h->value != currentDevice())
+            {
+                setIntParam("device", h->value);
+                refresh(false);
+            }
+            break;
+        case HitType::Program:
+            selectProgram(h->value);
+            break;
+        case HitType::Up:   step(+1); break;
+        case HitType::Down: step(-1); break;
+        case HitType::Key:  pressKey(h->value); break;
+        case HitType::Defeat:
+        {
+            const int defeatIndex = MidiverbAudioProcessor::getDeviceNumEffects(currentDevice()) - 1;
+            if (currentProgram() == defeatIndex)
+                selectProgram(programBeforeDefeat);
+            else
+            {
+                programBeforeDefeat = currentProgram();
+                selectProgram(defeatIndex);
+            }
+            break;
+        }
+    }
+    repaint();
+}
+
+void UnitPanel::mouseUp(const juce::MouseEvent&)
+{
+    if (hasPressed)
+    {
+        hasPressed = false;
+        repaint();
+    }
+}
+
+//==============================================================================
+// Painting
+
+juce::String UnitPanel::displayText() const
+{
+    const auto now = juce::Time::getMillisecondCounter();
+    if (knobValueShown >= 0)
+        return juce::String(knobValueShown).paddedLeft('0', 2);
+
+    const int device = shownDevice;
+    if (device == MIDIVERB2)
+    {
+        if (pendingDigit >= 0)
+            return juce::String(pendingDigit) + (((now / 250) % 2) == 0 ? "-" : " ");
+        return juce::String(shownProgram).paddedLeft('0', 2);
+    }
+
+    if (shownProgram >= MidiverbAudioProcessor::getDeviceNumEffects(device) - 1)
+        return "--";   // DEFEAT
+    return juce::String(shownProgram + 1).paddedLeft(' ', 2);
+}
+
+void UnitPanel::paint(juce::Graphics& g)
+{
+    g.setGradientFill(juce::ColourGradient(studioTop, 0.0f, 0.0f, studioBot, 0.0f, (float) getHeight(), false));
+    g.fillAll();
+
+    paintTabs(g);
+
+    if (shownDevice == MIDIVERB2)
+        paintRackUnit(g);
+    else
+        paintDesktopUnit(g, shownDevice == MIDIFEX);
+}
+
+void UnitPanel::paintTabs(juce::Graphics& g)
+{
+    static const char* labels[] = { "MIDIVERB", "MIDIFEX", "MIDIVERB II" };
+    for (const auto& h : hits)
+    {
+        if (h.type != HitType::Tab) continue;
+        const bool active = h.value == shownDevice;
+        const auto accent = accentFor(h.value);
+        auto r = h.area;
+
+        g.setColour(active ? Colour(0xff28282b) : Colour(0xff151517));
+        g.fillRoundedRectangle(r, 4.0f);
+        g.setColour(active ? accent : Colour(0xff2e2e31));
+        g.drawRoundedRectangle(r.reduced(0.5f), 4.0f, 1.0f);
+        if (active)
+            g.fillRect(r.getX() + 10.0f, r.getBottom() - 4.0f, r.getWidth() - 20.0f, 2.0f);
+
+        auto text = slantedText(labels[h.value], 14.0f, 0.22f);
+        const auto tb = text.getBounds();
+        text.applyTransform(juce::AffineTransform::translation(r.getCentreX() - tb.getCentreX(),
+                                                               r.getCentreY() - tb.getCentreY() - 1.0f));
+        g.setColour(active ? printWhite : printGrey.withAlpha(0.7f));
+        g.fillPath(text);
+    }
+
+    g.setColour(printGrey.withAlpha(0.6f));
+    g.setFont(font(11.0f));
+    g.drawText("DASP EMULATOR", Rectangle<float>(760.0f, 10.0f, 170.0f, 28.0f), juce::Justification::centredRight);
+}
+
+void UnitPanel::paintButton(juce::Graphics& g, Rectangle<float> r, Colour cap, bool pressed)
+{
+    g.setColour(Colour(0xff050505));
+    g.fillRoundedRectangle(r.expanded(2.0f), 4.0f);
+    auto face = pressed ? r.translated(0.0f, 1.0f).reduced(0.5f) : r;
+    const auto top = pressed ? cap.darker(0.35f) : cap.brighter(0.18f);
+    const auto bottom = pressed ? cap.darker(0.6f) : cap.darker(0.35f);
+    g.setGradientFill(juce::ColourGradient(top, face.getX(), face.getY(), bottom, face.getX(), face.getBottom(), false));
+    g.fillRoundedRectangle(face, 3.0f);
+    g.setColour(Colour(0x22ffffff));
+    g.drawRoundedRectangle(face.reduced(0.5f), 3.0f, 0.8f);
+}
+
+void UnitPanel::paintLed(juce::Graphics& g, juce::Point<float> c, Colour on, bool lit)
+{
+    auto r = Rectangle<float>(7.0f, 7.0f).withCentre(c);
+    if (lit)
+    {
+        g.setColour(on.withAlpha(0.25f));
+        g.fillEllipse(r.expanded(4.0f));
+    }
+    g.setColour(lit ? on : on.darker(0.85f).withAlpha(0.8f));
+    g.fillEllipse(r);
+    g.setColour(Colour(0x40ffffff));
+    g.fillEllipse(r.reduced(2.2f).translated(-0.8f, -0.8f));
+}
+
+void UnitPanel::paintDisplay(juce::Graphics& g, Rectangle<float> r)
+{
+    // Bezel and red filter glass
+    g.setColour(Colour(0xff050505));
+    g.fillRoundedRectangle(r.expanded(3.0f), 4.0f);
+    g.setGradientFill(juce::ColourGradient(Colour(0xff2a0606), r.getX(), r.getY(),
+                                           Colour(0xff120202), r.getX(), r.getBottom(), false));
+    g.fillRoundedRectangle(r, 3.0f);
+
+    const auto text = displayText();
+    const float digitH = r.getHeight() * 0.68f;
+    const float digitW = digitH * 0.55f;
+    const float spacing = digitW * 0.38f;
+    const float totalW = digitW * 2.0f + spacing;
+    float x = r.getCentreX() - totalW * 0.5f;
+    const float y = r.getCentreY() - digitH * 0.5f;
+
+    for (int i = 0; i < 2; ++i)
+    {
+        Rectangle<float> cell(x, y, digitW, digitH);
+        const auto lit = segmentsFor(i < text.length() ? text[i] : ' ');
+        g.setColour(Colour(0xff3a0b07));
+        g.fillPath(segmentPath(cell, 0x7F));
+        const auto litPath = segmentPath(cell, lit);
+        g.setColour(ledRed.withAlpha(0.25f));
+        g.strokePath(litPath, juce::PathStrokeType(digitW * 0.16f));
+        g.setColour(ledRed);
+        g.fillPath(litPath);
+        x += digitW + spacing;
+    }
+
+    // Glass reflection
+    g.setGradientFill(juce::ColourGradient(Colour(0x0cffffff), r.getX(), r.getY(),
+                                           Colour(0x00ffffff), r.getX(), r.getY() + r.getHeight() * 0.5f, false));
+    g.fillRoundedRectangle(r.reduced(2.0f, 1.0f), 2.0f);
+}
+
+void UnitPanel::paintKnobLabel(juce::Graphics& g, const juce::Slider& knob, const juce::String& text,
+                               Colour colour, bool above)
+{
+    auto b = knob.getBounds().toFloat();
+    auto r = above ? Rectangle<float>(b.getX() - 20.0f, b.getY() - 14.0f, b.getWidth() + 40.0f, 12.0f)
+                   : Rectangle<float>(b.getX() - 20.0f, b.getBottom() + 1.0f, b.getWidth() + 40.0f, 12.0f);
+    g.setColour(colour);
+    g.setFont(font(10.0f, true));
+    g.drawText(text, r, juce::Justification::centred);
+}
+
+//------------------------------------------------------------------------------
+// MIDIVERB and MIDIFEX: black desktop box seen from above, program chart on the
+// lid, small front strip with the controls.
+
+void UnitPanel::paintDesktopUnit(juce::Graphics& g, bool isMidifex)
+{
+    const auto accent = isMidifex ? fexGold : verbBlue;
+    const juce::String product = isMidifex ? "MIDIFEX" : "MIDIVERB";
+    const juce::String descriptor = isMidifex ? "DIGITAL EFFECTS" : "DIGITAL REVERB";
+
+    // Body
+    const Rectangle<float> body(30.0f, 52.0f, 900.0f, 574.0f);
+    g.setColour(juce::Colours::black.withAlpha(0.55f));
+    g.fillRoundedRectangle(body.translated(0.0f, 6.0f).expanded(2.0f), 26.0f);
+    g.setGradientFill(juce::ColourGradient(Colour(0xff26262a), body.getX(), body.getY(),
+                                           Colour(0xff101012), body.getX(), body.getBottom(), false));
+    g.fillRoundedRectangle(body, 24.0f);
+    g.setColour(Colour(0x18ffffff));
+    g.drawRoundedRectangle(body.reduced(1.0f), 24.0f, 1.2f);
+
+    // Printed lid area
+    const Rectangle<float> lid(48.0f, 68.0f, 864.0f, 428.0f);
+    g.setColour(Colour(0xff0c0c0d));
+    g.fillRoundedRectangle(lid, 6.0f);
+
+    // Connector legends along the rear edge
+    g.setFont(font(8.5f, true));
+    g.setColour(printGrey);
+    struct Legend { float x; const char* text; };
+    const Legend legends[] = { { 62, "LEFT" }, { 120, "RIGHT" }, { 205, "MIX" }, { 300, "LEFT" },
+                               { 356, "RIGHT" }, { 520, "MIDI IN" }, { 610, "MIDI THRU" }, { 860, "16V CT" } };
+    for (const auto& l : legends)
+        g.drawText(l.text, Rectangle<float>(l.x, 73.0f, 70.0f, 10.0f), juce::Justification::left);
+    g.drawText("INPUT", Rectangle<float>(92.0f, 84.0f, 50.0f, 10.0f), juce::Justification::left);
+    g.drawText("OUTPUT", Rectangle<float>(328.0f, 84.0f, 50.0f, 10.0f), juce::Justification::left);
+    g.drawLine(62.0f, 89.0f, 90.0f, 89.0f, 0.7f);
+    g.drawLine(124.0f, 89.0f, 148.0f, 89.0f, 0.7f);
+    g.drawLine(300.0f, 89.0f, 326.0f, 89.0f, 0.7f);
+    g.drawLine(366.0f, 89.0f, 390.0f, 89.0f, 0.7f);
+
+    // Speed stripes and wordmark
+    for (int i = 0; i < 4; ++i)
+    {
+        g.setColour(accent.withAlpha(i == 3 ? 0.9f : 0.75f));
+        g.fillRect(56.0f, 106.0f + 9.0f * (float) i, 848.0f, i == 3 ? 3.0f : 2.0f);
+    }
+
+    auto word = slantedText(product, 50.0f, 0.24f);
+    word.applyTransform(juce::AffineTransform::translation(70.0f, 145.0f));
+    g.setColour(Colour(0xff0c0c0d));
+    g.strokePath(word, juce::PathStrokeType(7.0f, juce::PathStrokeType::curved));
+    g.setColour(printWhite);
+    g.fillPath(word);
+    {
+        // Thin dark cuts through the lower half of the letters
+        juce::Graphics::ScopedSaveState state(g);
+        g.reduceClipRegion(word);
+        g.setColour(Colour(0xff0c0c0d));
+        for (int i = 0; i < 4; ++i)
+            g.fillRect(56.0f, 125.0f + 5.0f * (float) i, 400.0f, 1.6f);
+    }
+
+    auto desc = slantedText(descriptor, 15.0f, 0.24f);
+    desc.applyTransform(juce::AffineTransform::translation(720.0f, 145.0f));
+    g.setColour(Colour(0xff0c0c0d));
+    g.strokePath(desc, juce::PathStrokeType(5.0f));
+    g.setColour(printWhite);
+    g.fillPath(desc);
+    g.setColour(accent);
+    g.fillRect(56.0f, 152.0f, 848.0f, 2.0f);
+
+    // Program chart: 3 columns x 21 rows
+    const int device = shownDevice;
+    const float x0 = 60.0f, y0 = 160.0f, colW = 280.0f, rowH = 15.6f;
+    g.setColour(printWhite.withAlpha(0.55f));
+    g.drawRect(Rectangle<float>(x0, y0, colW * 3.0f, rowH * 21.0f), 0.8f);
+    for (int c = 0; c < 3; ++c)
+    {
+        g.drawLine(x0 + colW * (float) c, y0, x0 + colW * (float) c, y0 + rowH * 21.0f, 0.8f);
+        g.drawLine(x0 + colW * (float) c + 28.0f, y0, x0 + colW * (float) c + 28.0f, y0 + rowH * 21.0f, 0.6f);
+    }
+    for (int r = 1; r < 21; ++r)
+        g.drawLine(x0, y0 + rowH * (float) r, x0 + colW * 3.0f, y0 + rowH * (float) r, 0.5f);
+
+    g.setFont(font(10.5f, true));
+    for (int i = 0; i < 63; ++i)
+    {
+        const Rectangle<float> cell(x0 + colW * (float) (i / 21), y0 + rowH * (float) (i % 21), colW, rowH);
+        const bool selected = i == shownProgram;
+        if (selected)
+        {
+            g.setColour(accent);
+            g.fillRect(cell.reduced(1.0f));
+        }
+        g.setColour(selected ? Colour(0xff0c0c0d) : printWhite);
+        g.drawText(juce::String(i + 1), cell.withWidth(24.0f), juce::Justification::centredRight);
+        g.drawText(juce::String(MidiverbAudioProcessor::getEffectName(device, i)).toUpperCase(),
+                   cell.withTrimmedLeft(36.0f), juce::Justification::centredLeft);
+    }
+
+    // Front strip
+    const Rectangle<float> strip(110.0f, 508.0f, 740.0f, 102.0f);
+    g.setColour(Colour(0xff050506));
+    g.fillRoundedRectangle(strip.expanded(3.0f), 8.0f);
+    g.setGradientFill(juce::ColourGradient(Colour(0xff17171a), strip.getX(), strip.getY(),
+                                           Colour(0xff0e0e10), strip.getX(), strip.getBottom(), false));
+    g.fillRoundedRectangle(strip, 6.0f);
+    g.setColour(accent.withAlpha(0.8f));
+    g.fillRect(strip.getX() + 8.0f, 514.0f, strip.getWidth() - 16.0f, 2.0f);
+    g.fillRect(strip.getX() + 8.0f, 519.0f, strip.getWidth() - 16.0f, 1.2f);
+    g.fillRect(strip.getX() + 8.0f, 601.0f, strip.getWidth() - 16.0f, 1.2f);
+
+    const int defeatIndex = MidiverbAudioProcessor::getDeviceNumEffects(device) - 1;
+    for (const auto& h : hits)
+    {
+        if (h.type == HitType::Defeat || h.type == HitType::Up || h.type == HitType::Down)
+            paintButton(g, h.area, Colour(0xff313134), isPressed(h.type));
+    }
+
+    g.setFont(font(9.5f, true));
+    g.setColour(printWhite);
+    g.drawText("DEFEAT", Rectangle<float>(141.0f, 568.0f, 60.0f, 12.0f), juce::Justification::centred);
+    g.drawText("DOWN", Rectangle<float>(369.0f, 568.0f, 60.0f, 12.0f), juce::Justification::centred);
+    g.drawText("UP", Rectangle<float>(427.0f, 568.0f, 60.0f, 12.0f), juce::Justification::centred);
+    g.drawText("PROGRAM", Rectangle<float>(250.0f, 584.0f, 100.0f, 12.0f), juce::Justification::centred);
+
+    paintLed(g, { 220.0f, 540.0f }, ledRed, shownOverload);
+    paintLed(g, { 220.0f, 562.0f }, Colour(0xff3ddc5a), shownProgram == defeatIndex);
+    g.setFont(font(8.5f, true));
+    g.setColour(printGrey);
+    g.drawText("0", Rectangle<float>(228.0f, 535.0f, 20.0f, 10.0f), juce::Justification::left);
+    g.drawText("DEF", Rectangle<float>(228.0f, 557.0f, 20.0f, 10.0f), juce::Justification::left);
+
+    paintDisplay(g, { 256.0f, 532.0f, 88.0f, 48.0f });
+
+    paintKnobLabel(g, mixKnob, "MIX", printWhite, false);
+    paintKnobLabel(g, feedbackKnob, "FEEDBACK", printWhite, false);
+}
+
+//------------------------------------------------------------------------------
+// MIDIVERB II: 1U rack unit. The lid (program list) seen from above, and the
+// front panel below it.
+
+void UnitPanel::paintRackUnit(juce::Graphics& g)
+{
+    const int device = shownDevice;
+
+    // Lid
+    const Rectangle<float> lid(30.0f, 52.0f, 900.0f, 400.0f);
+    g.setColour(juce::Colours::black.withAlpha(0.5f));
+    g.fillRect(lid.translated(0.0f, 5.0f));
+    g.setGradientFill(juce::ColourGradient(Colour(0xff1d1d20), lid.getX(), lid.getY(),
+                                           Colour(0xff141416), lid.getX(), lid.getBottom(), false));
+    g.fillRect(lid);
+    g.setColour(Colour(0x07ffffff));
+    for (float y = lid.getY() + 2.0f; y < lid.getBottom(); y += 3.0f)
+        g.drawHorizontalLine((int) y, lid.getX(), lid.getRight());
+    drawScrews(g, lid, 9.0f);
+
+    // Program list printed on the lid
+    const float x0 = 50.0f, y0 = 84.0f, colW = 172.0f, rowH = 17.2f;
+    g.setFont(font(9.0f, true));
+    g.setColour(verb2Blue);
+    g.drawText("PROGRAMS", Rectangle<float>(x0, 66.0f, 200.0f, 12.0f), juce::Justification::left);
+    g.fillRect(x0 + 62.0f, 71.5f, colW * 5.0f - 62.0f, 1.2f);
+
+    g.setColour(printWhite.withAlpha(0.35f));
+    for (int c = 0; c <= 5; ++c)
+        g.drawLine(x0 + colW * (float) c, y0, x0 + colW * (float) c, y0 + rowH * 20.0f, 0.7f);
+    g.drawLine(x0, y0, x0 + colW * 5.0f, y0, 0.7f);
+    g.drawLine(x0, y0 + rowH * 20.0f, x0 + colW * 5.0f, y0 + rowH * 20.0f, 0.7f);
+
+    g.setFont(font(10.0f, true));
+    for (int i = 0; i < 100; ++i)
+    {
+        const Rectangle<float> cell(x0 + colW * (float) (i / 20), y0 + rowH * (float) (i % 20), colW, rowH);
+        const bool selected = i == shownProgram;
+        if (selected)
+        {
+            g.setColour(verb2Blue);
+            g.fillRect(cell.reduced(1.0f));
+        }
+        else if (i % 10 == 0 && i > 0)
+        {
+            g.setColour(printWhite.withAlpha(0.22f));
+            g.drawLine(cell.getX(), cell.getY(), cell.getRight(), cell.getY(), 0.6f);
+        }
+        g.setColour(selected ? Colour(0xff0c0c0d) : verb2Blue.brighter(0.3f));
+        g.drawText(juce::String(i).paddedLeft('0', 2), cell.withWidth(24.0f), juce::Justification::centredRight);
+        g.setColour(selected ? Colour(0xff0c0c0d) : printWhite);
+        g.drawFittedText(juce::String(MidiverbAudioProcessor::getEffectName(device, i)).toUpperCase(),
+                         cell.withTrimmedLeft(30.0f).withTrimmedRight(4.0f).toNearestInt(),
+                         juce::Justification::centredLeft, 1, 0.8f);
+    }
+
+    // Front panel
+    const Rectangle<float> face(14.0f, 466.0f, 932.0f, 152.0f);
+    g.setColour(juce::Colours::black.withAlpha(0.6f));
+    g.fillRect(face.translated(0.0f, 5.0f));
+    g.setGradientFill(juce::ColourGradient(Colour(0xff222225), face.getX(), face.getY(),
+                                           Colour(0xff0f0f11), face.getX(), face.getBottom(), false));
+    g.fillRect(face);
+    g.setColour(Colour(0x22ffffff));
+    g.drawHorizontalLine((int) face.getY() + 1, face.getX(), face.getRight());
+
+    // Rack ears with slots
+    for (float earX : { face.getX(), face.getRight() - 40.0f })
+    {
+        g.setColour(Colour(0x30000000));
+        g.drawVerticalLine((int) (earX < 100.0f ? earX + 40.0f : earX), face.getY(), face.getBottom());
+        for (float sy : { face.getY() + 24.0f, face.getBottom() - 34.0f })
+        {
+            auto slot = Rectangle<float>(earX + 9.0f, sy, 22.0f, 10.0f);
+            g.setColour(Colour(0xff050505));
+            g.fillRoundedRectangle(slot, 5.0f);
+            g.setColour(Colour(0x18ffffff));
+            g.drawRoundedRectangle(slot.translated(0.0f, 1.0f), 5.0f, 0.6f);
+        }
+    }
+
+    // Wordmark
+    auto word = slantedText("MIDIVERB", 40.0f, 0.24f);
+    auto numeral = slantedText("II", 40.0f, 0.24f);
+    word.applyTransform(juce::AffineTransform::translation(78.0f, 552.0f));
+    numeral.applyTransform(juce::AffineTransform::translation(word.getBounds().getRight() + 6.0f, 552.0f));
+    for (auto* p : { &word, &numeral })
+    {
+        g.setGradientFill(juce::ColourGradient(verb2Blue.brighter(0.5f), 0.0f, 518.0f, verb2Blue.darker(0.2f), 0.0f, 552.0f, false));
+        g.fillPath(*p);
+        g.setColour(verb2Blue.brighter(0.8f).withAlpha(0.7f));
+        g.strokePath(*p, juce::PathStrokeType(0.8f));
+    }
+    auto sub = slantedText("16 BIT DIGITAL EFFECTS PROCESSOR", 11.0f, 0.2f);
+    sub.applyTransform(juce::AffineTransform::translation(74.0f, 570.0f));
+    g.setColour(verb2Blue);
+    g.fillPath(sub);
+    g.fillRect(74.0f, 576.0f, sub.getBounds().getWidth() + 4.0f, 1.0f);
+
+    // Knobs
+    paintKnobLabel(g, mixKnob, "MIX", printWhite, true);
+    paintKnobLabel(g, feedbackKnob, "FEEDBACK", printWhite, true);
+
+    // Clip LED and display
+    paintLed(g, { 512.0f, 520.0f }, ledRed, shownOverload);
+    g.setFont(font(8.5f, true));
+    g.setColour(printWhite);
+    g.drawText("CLIP", Rectangle<float>(498.0f, 528.0f, 28.0f, 10.0f), juce::Justification::centred);
+    paintDisplay(g, { 530.0f, 508.0f, 80.0f, 62.0f });
+    g.setColour(printWhite);
+    g.setFont(font(8.5f, true));
+    g.drawText("PROGRAM", Rectangle<float>(530.0f, 576.0f, 80.0f, 10.0f), juce::Justification::centred);
+
+    // Up / down and keypad
+    for (const auto& h : hits)
+    {
+        if (h.type == HitType::Up || h.type == HitType::Down)
+        {
+            paintButton(g, h.area, keyOrange, isPressed(h.type));
+            g.setColour(Colour(0xff1a1208));
+            g.setFont(font(8.5f, true));
+            g.drawText(h.type == HitType::Up ? "UP" : "DOWN",
+                       h.area.translated(0.0f, isPressed(h.type) ? 1.0f : 0.0f), juce::Justification::centred);
+        }
+        else if (h.type == HitType::Key)
+        {
+            paintButton(g, h.area, Colour(0xff3b3b3f), isPressed(HitType::Key, h.value));
+            g.setColour(printWhite);
+            g.setFont(font(12.0f, true));
+            g.drawText(juce::String(h.value),
+                       h.area.translated(0.0f, isPressed(HitType::Key, h.value) ? 1.0f : 0.0f), juce::Justification::centred);
+        }
+    }
+
+    // Program group legends around the keypad (first digit of the program number)
+    g.setFont(font(8.5f, true));
+    g.setColour(printWhite);
+    auto keyX = [](int col) { return 690.0f + 42.0f * (float) col; };
+    auto legend = [&](int fromCol, int toCol, float y, const char* text, bool bracketBelow)
+    {
+        const float x1 = keyX(fromCol), x2 = keyX(toCol) + 34.0f;
+        g.drawText(text, Rectangle<float>(x1 - 6.0f, y, x2 - x1 + 12.0f, 10.0f), juce::Justification::centred);
+        if (toCol > fromCol)
+        {
+            const float ly = bracketBelow ? y + 12.0f : y - 2.0f;
+            g.drawLine(x1 + 2.0f, ly, x2 - 2.0f, ly, 0.7f);
         }
     };
+    legend(0, 2, 490.0f, "REVERB", true);
+    legend(3, 3, 490.0f, "GATE", true);
+    legend(4, 4, 490.0f, "REVERSE", true);
+    legend(0, 0, 580.0f, "FLANGE", false);
+    legend(1, 1, 580.0f, "CHORUS", false);
+    legend(2, 3, 580.0f, "DELAY", false);
+    legend(4, 4, 580.0f, "MULTI", false);
 
-    // Initialize program list for current device
-    updateProgramSelector();
+    drawScrews(g, Rectangle<float>(54.0f, face.getY(), 852.0f, face.getHeight()), 8.0f);
+}
 
-    // Dry/Wet slider
-    dryWetLabel.setText("Dry/Wet", juce::dontSendNotification);
-    dryWetLabel.setJustificationType(juce::Justification::centred);
-    addAndMakeVisible(dryWetLabel);
+//==============================================================================
+MidiverbAudioProcessorEditor::MidiverbAudioProcessorEditor(MidiverbAudioProcessor& p)
+    : AudioProcessorEditor(&p), audioProcessor(p), panel(p)
+{
+    addAndMakeVisible(panel);
 
-    dryWetSlider.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
-    dryWetSlider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 60, 20);
-    addAndMakeVisible(dryWetSlider);
-
-    dryWetAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-        audioProcessor.getAPVTS(), "dryWet", dryWetSlider);
-
-    // Feedback slider
-    feedbackLabel.setText("Feedback", juce::dontSendNotification);
-    feedbackLabel.setJustificationType(juce::Justification::centred);
-    addAndMakeVisible(feedbackLabel);
-
-    feedbackSlider.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
-    feedbackSlider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 60, 20);
-    addAndMakeVisible(feedbackSlider);
-
-    feedbackAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-        audioProcessor.getAPVTS(), "feedback", feedbackSlider);
-
-    setSize(defaultWidth, defaultHeight);
     setResizable(true, true);
-    setResizeLimits(400, 272, 10000, 10000);
+    setResizeLimits(UnitPanel::logicalWidth / 2, UnitPanel::logicalHeight / 2,
+                    UnitPanel::logicalWidth * 2, UnitPanel::logicalHeight * 2);
+    if (auto* c = getConstrainer())
+        c->setFixedAspectRatio((double) UnitPanel::logicalWidth / (double) UnitPanel::logicalHeight);
+    setSize(defaultWidth, defaultHeight);
 
     startTimerHz(30);
 }
@@ -71,154 +859,21 @@ MidiverbAudioProcessorEditor::~MidiverbAudioProcessorEditor()
     stopTimer();
 }
 
-void MidiverbAudioProcessorEditor::updateProgramSelector()
-{
-    int deviceIndex = static_cast<int>(*audioProcessor.getAPVTS().getRawParameterValue("device"));
-    int currentIndex = static_cast<int>(*audioProcessor.getAPVTS().getRawParameterValue("program"));
-
-    // Rebuild combo box items only when device changes
-    if (deviceIndex != lastDeviceIndex)
-    {
-        lastDeviceIndex = deviceIndex;
-        lastProgramIndex = -1;  // Force sync after device change
-        programSelector.clear(juce::dontSendNotification);
-
-        int numEffects = MidiverbAudioProcessor::getDeviceNumEffects(deviceIndex);
-        int displayOffset = MidiverbAudioProcessor::getDeviceDisplayOffset(deviceIndex);
-
-        // ComboBox ID = effect index + 1 (direct mapping, no normalization)
-        for (int i = 0; i < numEffects; ++i) {
-            int displayNum = i + displayOffset;
-            juce::String name = MidiverbAudioProcessor::getEffectName(deviceIndex, i);
-            programSelector.addItem(juce::String(displayNum) + ": " + name, i + 1);
-        }
-    }
-
-    // Clamp to valid range
-    int numEffects = MidiverbAudioProcessor::getDeviceNumEffects(deviceIndex);
-    if (currentIndex < 0) currentIndex = 0;
-    if (currentIndex >= numEffects) currentIndex = numEffects - 1;
-
-    // Only sync combo box when parameter value has changed (not on every tick)
-    // This avoids fighting with user interaction
-    if (currentIndex != lastProgramIndex)
-    {
-        lastProgramIndex = currentIndex;
-        programSelector.setSelectedId(currentIndex + 1, juce::dontSendNotification);
-    }
-
-    // Update parameter only if it was clamped
-    int paramValue = static_cast<int>(*audioProcessor.getAPVTS().getRawParameterValue("program"));
-    if (currentIndex != paramValue) {
-        auto* param = audioProcessor.getAPVTS().getParameter("program");
-        param->setValueNotifyingHost(param->convertTo0to1(static_cast<float>(currentIndex)));
-    }
-}
-
-void MidiverbAudioProcessorEditor::timerCallback()
-{
-    // Check for device changes (this also syncs the program selector)
-    updateProgramSelector();
-
-    if (audioProcessor.getAndClearInputOverload())
-    {
-        showOverload = true;
-        repaint();
-    }
-    else if (showOverload)
-    {
-        showOverload = false;
-        repaint();
-    }
-}
-
 void MidiverbAudioProcessorEditor::paint(juce::Graphics& g)
 {
-    const float scale = static_cast<float>(getHeight()) / defaultHeight;
-
-    g.fillAll(juce::Colours::darkgrey);
-
-    g.setColour(juce::Colours::white);
-    g.setFont(20.0f * scale);
-    const int titleHeight = static_cast<int>(40 * scale);
-    g.drawFittedText("Midiverb Emulator", getLocalBounds().removeFromTop(titleHeight),
-                     juce::Justification::centred, 1);
-
-    // Input overload indicator (positioned relative to top-right)
-    const float indicatorSize = 15.0f * scale;
-    const float indicatorMargin = 10.0f * scale;
-    auto indicatorBounds = juce::Rectangle<float>(
-        getWidth() - indicatorSize - indicatorMargin,
-        indicatorMargin,
-        indicatorSize,
-        indicatorSize);
-    g.setColour(showOverload ? juce::Colours::red : juce::Colours::darkred);
-    g.fillEllipse(indicatorBounds);
+    g.fillAll(studioBot);
 }
 
 void MidiverbAudioProcessorEditor::resized()
 {
-    const float scale = static_cast<float>(getHeight()) / defaultHeight;
-    auto area = getLocalBounds();
-
-    // Scale fonts for labels
-    const float labelFontSize = 14.0f * scale;
-    juce::Font labelFont = juce::Font(juce::FontOptions().withHeight(labelFontSize));
-
-    deviceLabel.setFont(labelFont);
-    programLabel.setFont(labelFont);
-    dryWetLabel.setFont(labelFont);
-    feedbackLabel.setFont(labelFont);
-
-    // Title area: ~15% of height
-    const int titleHeight = static_cast<int>(50 * scale);
-    area.removeFromTop(titleHeight);
-
-    // Selector rows: ~15% each
-    const int selectorRowHeight = static_cast<int>(50 * scale);
-    const int labelHeight = static_cast<int>(20 * scale);
-    const int hPadding = static_cast<int>(20 * scale);
-    const int vPadding = static_cast<int>(5 * scale);
-
-    // Device selector
-    auto deviceArea = area.removeFromTop(selectorRowHeight);
-    deviceLabel.setBounds(deviceArea.removeFromTop(labelHeight));
-    deviceSelector.setBounds(deviceArea.reduced(hPadding, vPadding));
-
-    // Program selector
-    auto selectorArea = area.removeFromTop(selectorRowHeight);
-    programLabel.setBounds(selectorArea.removeFromTop(labelHeight));
-    programSelector.setBounds(selectorArea.reduced(hPadding, vPadding));
-
-    // Knob area: remaining space
-    const int knobPaddingH = static_cast<int>(20 * scale);
-    const int knobPaddingV = static_cast<int>(10 * scale);
-    auto knobArea = area.reduced(knobPaddingH, knobPaddingV);
-    auto knobWidth = knobArea.getWidth() / 2;
-
-    // Scale text box size proportionally
-    const int textBoxWidth = static_cast<int>(60 * scale);
-    const int textBoxHeight = static_cast<int>(20 * scale);
-    dryWetSlider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, textBoxWidth, textBoxHeight);
-    feedbackSlider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, textBoxWidth, textBoxHeight);
-
-    // Dry/Wet knob
-    auto dryWetArea = knobArea.removeFromLeft(knobWidth);
-    dryWetLabel.setBounds(dryWetArea.removeFromTop(labelHeight));
-    dryWetSlider.setBounds(dryWetArea.reduced(static_cast<int>(10 * scale), 0));
-
-    // Feedback knob
-    auto feedbackArea = knobArea;
-    feedbackLabel.setBounds(feedbackArea.removeFromTop(labelHeight));
-    feedbackSlider.setBounds(feedbackArea.reduced(static_cast<int>(10 * scale), 0));
+    const float scale = juce::jmin((float) getWidth() / (float) UnitPanel::logicalWidth,
+                                   (float) getHeight() / (float) UnitPanel::logicalHeight);
+    panel.setTransform({});
+    panel.setBounds(0, 0, UnitPanel::logicalWidth, UnitPanel::logicalHeight);
+    panel.setTransform(juce::AffineTransform::scale(scale));
 }
 
-void MidiverbAudioProcessorEditor::mouseDown(const juce::MouseEvent& e)
+void MidiverbAudioProcessorEditor::timerCallback()
 {
-    if (e.mods.isPopupMenu())
-    {
-        juce::PopupMenu menu;
-        menu.addItem(1, juce::String("Build: ") + __DATE__ + " " + __TIME__, false);
-        menu.showMenuAsync(juce::PopupMenu::Options());
-    }
+    panel.refresh(audioProcessor.getAndClearInputOverload());
 }
