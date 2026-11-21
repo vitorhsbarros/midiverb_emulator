@@ -326,10 +326,11 @@ void UnitPanel::layout()
             hits.push_back({ { 690.0f + 42.0f * (float) (k % 5), (k < 5 ? 506.0f : 546.0f), 34.0f, 28.0f },
                              HitType::Key, k });
 
-        inputKnob.setBounds(298, 516, 46, 46);
-        mixKnob.setBounds(348, 516, 46, 46);
-        feedbackKnob.setBounds(398, 516, 46, 46);
-        outputKnob.setBounds(448, 516, 46, 46);
+        // Right of the wordmark box (x <= 276), left of the clip LED (x ~ 505)
+        inputKnob.setBounds(292, 516, 46, 46);
+        mixKnob.setBounds(342, 516, 46, 46);
+        feedbackKnob.setBounds(392, 516, 46, 46);
+        outputKnob.setBounds(442, 516, 46, 46);
     }
     else
     {
@@ -782,22 +783,37 @@ void UnitPanel::paintRackUnit(juce::Graphics& g)
     }
 
     // Wordmark
+    // The default typeface differs per OS (and so does the text width), so the
+    // wordmark and subtitle are fitted into a fixed box left of the knobs.
+    constexpr float brandLeft = 74.0f, brandRight = 276.0f;
+    auto fitToBrandBox = [&](juce::Path& p, float baselineY)
+    {
+        const auto b = p.getBounds();
+        const float scale = juce::jmin(1.0f, (brandRight - brandLeft) / b.getWidth());
+        p.applyTransform(juce::AffineTransform::translation(-b.getX(), 0.0f)
+                             .scaled(scale)
+                             .translated(brandLeft, baselineY));
+    };
+
     auto word = slantedText("MIDIVERB", 40.0f, 0.24f);
     auto numeral = slantedText("II", 40.0f, 0.24f);
-    word.applyTransform(juce::AffineTransform::translation(78.0f, 552.0f));
-    numeral.applyTransform(juce::AffineTransform::translation(word.getBounds().getRight() + 6.0f, 552.0f));
-    for (auto* p : { &word, &numeral })
-    {
-        g.setGradientFill(juce::ColourGradient(verb2Blue.brighter(0.5f), 0.0f, 518.0f, verb2Blue.darker(0.2f), 0.0f, 552.0f, false));
-        g.fillPath(*p);
-        g.setColour(verb2Blue.brighter(0.8f).withAlpha(0.7f));
-        g.strokePath(*p, juce::PathStrokeType(0.8f));
-    }
+    numeral.applyTransform(juce::AffineTransform::translation(word.getBounds().getRight() + 6.0f, 0.0f));
+    juce::Path brand(word);
+    brand.addPath(numeral);
+    const float wordBaseline = 552.0f;
+    fitToBrandBox(brand, wordBaseline);
+    const auto brandBounds = brand.getBounds();
+    g.setGradientFill(juce::ColourGradient(verb2Blue.brighter(0.5f), 0.0f, brandBounds.getY(),
+                                           verb2Blue.darker(0.2f), 0.0f, wordBaseline, false));
+    g.fillPath(brand);
+    g.setColour(verb2Blue.brighter(0.8f).withAlpha(0.7f));
+    g.strokePath(brand, juce::PathStrokeType(0.8f));
+
     auto sub = slantedText("16 BIT DIGITAL EFFECTS PROCESSOR", 11.0f, 0.2f);
-    sub.applyTransform(juce::AffineTransform::translation(74.0f, 570.0f));
+    fitToBrandBox(sub, 570.0f);
     g.setColour(verb2Blue);
     g.fillPath(sub);
-    g.fillRect(74.0f, 576.0f, sub.getBounds().getWidth() + 4.0f, 1.0f);
+    g.fillRect(brandLeft, 576.0f, sub.getBounds().getWidth() + 4.0f, 1.0f);
 
     // Knobs
     paintKnobLabel(g, inputKnob, "INPUT", printWhite, true);
