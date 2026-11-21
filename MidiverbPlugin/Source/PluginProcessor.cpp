@@ -119,21 +119,38 @@ void MidiverbAudioProcessor::changeProgramName(int index, const juce::String& ne
 void MidiverbAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
     hostSampleRate = sampleRate;
-    phaseIncrement = EFFECT_SAMPLE_RATE / sampleRate;
+    oversampling = juce::jmax(1, (int) std::ceil(INTERNAL_MIN_RATE / sampleRate - 1e-9));
+    internalRate = sampleRate * oversampling;
 
-    // Setup filters at host sample rate
-    antiAliasFilter.setCutoff(sampleRate, FILTER_CUTOFF);
-    antiAliasFilter.reset();
+    inputModel.design(analog::midiverbInput(), internalRate);
+    outputModelL.design(analog::midiverbOutput(), internalRate);
+    outputModelR.design(analog::midiverbOutput(), internalRate);
 
-    reconstructFilterL.setCutoff(sampleRate, FILTER_CUTOFF);
-    reconstructFilterL.reset();
-    reconstructFilterR.setCutoff(sampleRate, FILTER_CUTOFF);
-    reconstructFilterR.reset();
+    // MIDIVerb II: no faithful model yet, generic filters just below its 15.6 kHz Nyquist
+    genericInput.setCutoff(internalRate, 14000.0);
+    genericOutputL.setCutoff(internalRate, 14000.0);
+    genericOutputR.setCutoff(internalRate, 14000.0);
 
-    // Reset interpolation buffers
-    inputBuffer.reset();
-    outputBufferL.reset();
-    outputBufferR.reset();
+    const double decimationCutoff = juce::jmin(20000.0, 0.45 * sampleRate);
+    decimateL.setCutoff(internalRate, decimationCutoff);
+    decimateR.setCutoff(internalRate, decimationCutoff);
+
+    resetSignalState();
+}
+
+void MidiverbAudioProcessor::resetSignalState()
+{
+    inputModel.reset();
+    outputModelL.reset();
+    outputModelR.reset();
+    genericInput.reset();
+    genericOutputL.reset();
+    genericOutputR.reset();
+    decimateL.reset();
+    decimateR.reset();
+    prevHostInput = 0.0;
+    prevAnalogIn = 0.0;
+    heldL = heldR = 0.0;
 
     // Reset effect state
     DRAM.fill(0);
@@ -191,6 +208,14 @@ void MidiverbAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
     // Check if device or effect changed - reinitialize LFOs if needed
     if (deviceIndex != lastDeviceIndex || effectIndex != lastEffectIndex)
     {
+        if (deviceIndex != lastDeviceIndex)
+        {
+            // Different converter filters: start them from silence
+            inputModel.reset(); outputModelL.reset(); outputModelR.reset();
+            genericInput.reset(); genericOutputL.reset(); genericOutputR.reset();
+            prevAnalogIn = 0.0;
+            heldL = heldR = 0.0;
+        }
         lastDeviceIndex = deviceIndex;
         lastEffectIndex = effectIndex;
 
@@ -217,65 +242,94 @@ void MidiverbAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
     float equalPowerDry = std::cos(angle);
     float equalPowerWet = std::sin(angle);
 
+    const bool modelled = dev.modelledAnalog;
+    const bool adc12bit = dev.adc12bit;
+    const double phaseIncrement = dev.sampleRate / internalRate;
+    const double osInv = 1.0 / oversampling;
+
     for (int i = 0; i < numSamples; i++)
     {
         float dryL = leftChannel[i];
         float dryR = rightChannel[i];
 
-        // Sum to mono with feedback and apply anti-aliasing filter
-        double monoIn = (dryL + dryR) * 0.5 + (lastWetL + lastWetR) * 0.5 * feedback;
-        if (std::abs(monoIn) > 1.0)
-            inputOverload.store(true, std::memory_order_relaxed);
-        double filtered = antiAliasFilter.process(monoIn);
+        // Mono sum (the units sum L+R before the ADC), plus optional feedback
+        const double monoIn = (dryL + dryR) * 0.5 + (lastWetL + lastWetR) * 0.5 * feedback;
 
-        // Push filtered sample to input buffer for interpolation
-        inputBuffer.push(filtered);
-
-        // Accumulate phase - process effect when we cross sample boundaries
-        phase += phaseIncrement;
-        while (phase >= 1.0)
+        double wetL = 0.0, wetR = 0.0;
+        for (int k = 1; k <= oversampling; ++k)
         {
-            phase -= 1.0;
+            // Upsample linearly to the internal rate, then the input (anti-alias) filter
+            const double x = prevHostInput + (monoIn - prevHostInput) * (k * osInv);
+            const double analogIn = modelled ? inputModel.process(x) : genericInput.process(x);
 
-            // Interpolate input at the exact fractional position where the effect sample falls
-            // This eliminates beat frequency artifacts at non-integer sample rate ratios
-            double inputFrac = 1.0 - phase / phaseIncrement;
-            double interpolatedInput = inputBuffer.interpolate(inputFrac);
+            // Keep last value of the DAC hold for the part of this internal sample before an update
+            double boxL = heldL, boxR = heldR;
 
-            // Process one effect sample at 24kHz
-            // Original hardware uses 13-bit samples (±4095 range, same as >> 3 from 16-bit)
-            int16_t inputInt = static_cast<int16_t>(saturate(static_cast<float>(interpolatedInput)) * 0x0fff);
-            int16_t outLeftInt, outRightInt;
-
-            effectFn(inputInt, &outLeftInt, &outRightInt, DRAM.data(), memoryPointer++, lfo1Value, lfo2Value);
-
-            // Update LFO every 8 effect samples (at ~2930 Hz)
-            if (currentLfoPatch != nullptr)
+            phase += phaseIncrement;
+            if (phase >= 1.0)
             {
-                lfoSampleCounter++;
-                if (lfoSampleCounter >= LFO_UPDATE_INTERVAL)
+                phase -= 1.0;
+                // Time since the sampling instant, in internal samples (0..1)
+                const double sinceEdge = phase / phaseIncrement;
+
+                // ADC sample-and-hold: value at the exact sampling instant
+                const double sampled = analogIn + (prevAnalogIn - analogIn) * sinceEdge;
+                if (std::abs(sampled) > 1.0)
+                    inputOverload.store(true, std::memory_order_relaxed);
+                const float clipped = saturate(static_cast<float>(sampled));
+
+                int16_t inputInt;
+                if (adc12bit)
                 {
-                    lfoSampleCounter = 0;
-                    lfo1Value = lfo1->update(lfo1) | (static_cast<uint32_t>(currentLfoPatch->top1) << 16);
-                    lfo2Value = lfo2->update(lfo2) | (static_cast<uint32_t>(currentLfoPatch->top2) << 16);
+                    // 12-bit successive approximation (truncating), shifted left one bit
+                    // into the 13-bit DSP input range
+                    const int code = juce::jlimit(-2048, 2047, (int) std::floor(clipped * 2048.0f));
+                    inputInt = static_cast<int16_t>(code * 2);
                 }
+                else
+                {
+                    inputInt = static_cast<int16_t>(clipped * 0x0fff);
+                }
+
+                int16_t outLeftInt, outRightInt;
+                effectFn(inputInt, &outLeftInt, &outRightInt, DRAM.data(), memoryPointer++, lfo1Value, lfo2Value);
+
+                // Update LFO every 8 effect samples
+                if (currentLfoPatch != nullptr)
+                {
+                    lfoSampleCounter++;
+                    if (lfoSampleCounter >= LFO_UPDATE_INTERVAL)
+                    {
+                        lfoSampleCounter = 0;
+                        lfo1Value = lfo1->update(lfo1) | (static_cast<uint32_t>(currentLfoPatch->top1) << 16);
+                        lfo2Value = lfo2->update(lfo2) | (static_cast<uint32_t>(currentLfoPatch->top2) << 16);
+                    }
+                }
+
+                const double newL = outLeftInt / static_cast<double>(0x0fff);
+                const double newR = outRightInt / static_cast<double>(0x0fff);
+
+                // DAC zero-order hold: the step happened sinceEdge before this sample,
+                // so average the old and new level over the internal sample period
+                boxL = heldL + (newL - heldL) * sinceEdge;
+                boxR = heldR + (newR - heldR) * sinceEdge;
+                heldL = newL;
+                heldR = newR;
             }
+            prevAnalogIn = analogIn;
 
-            float outL = outLeftInt / static_cast<float>(0x0fff);
-            float outR = outRightInt / static_cast<float>(0x0fff);
-
-            // Push to interpolation buffers
-            outputBufferL.push(outL);
-            outputBufferR.push(outR);
+            // Output (reconstruction) filter, then decimation filter
+            double yL = modelled ? outputModelL.process(boxL) : genericOutputL.process(boxL);
+            double yR = modelled ? outputModelR.process(boxR) : genericOutputR.process(boxR);
+            if (oversampling > 1)
+            {
+                yL = decimateL.process(yL);
+                yR = decimateR.process(yR);
+            }
+            wetL = yL;
+            wetR = yR;
         }
-
-        // Interpolate output at host sample rate
-        double wetL = outputBufferL.interpolate(phase);
-        double wetR = outputBufferR.interpolate(phase);
-
-        // Reconstruction filter
-        wetL = reconstructFilterL.process(wetL);
-        wetR = reconstructFilterR.process(wetR);
+        prevHostInput = monoIn;
 
         // Store for feedback
         lastWetL = wetL;

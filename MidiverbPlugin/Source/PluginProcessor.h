@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cmath>
+#include "AnalogModel.h"
 
 // Forward declarations for LFO types (defined in lfo.h)
 struct Lfo;
@@ -159,8 +160,7 @@ public:
 
     static constexpr int NUM_DEVICES = 3;
     static constexpr int MAX_PROGRAMS = 100;  // MIDIVerb 2 has 100 programs (0-99)
-    static constexpr double EFFECT_SAMPLE_RATE = 24000.0;
-    static constexpr double FILTER_CUTOFF = 10000.0;  // Below 12kHz Nyquist
+    static constexpr double INTERNAL_MIN_RATE = 176400.0;  // oversampled analog-model rate
 
     // Device info accessors
     static const char* getDeviceName(int deviceIndex);
@@ -181,24 +181,28 @@ private:
     double lastWetL = 0.0;
     double lastWetR = 0.0;
 
-    // Resampling state
+    // Resampling state. Audio runs at an oversampled internal rate (host rate x
+    // oversampling) where the analog filters are modelled; the DSP is sampled
+    // from it at the original unit's rate and its output held like the real DAC.
     double hostSampleRate = 48000.0;
+    int oversampling = 4;
+    double internalRate = 192000.0;
     double phase = 0.0;           // Fractional position in effect sample stream
-    double phaseIncrement = 1.0;  // 24000 / hostRate
+    double prevHostInput = 0.0;   // for linear upsampling host -> internal
+    double prevAnalogIn = 0.0;    // previous internal-rate sample after the input filter
+    double heldL = 0.0, heldR = 0.0;  // DAC sample-and-hold outputs
 
-    // Anti-aliasing filter (before downsampling) - mono input
-    LowpassFilter8 antiAliasFilter;
+    void resetSignalState();
 
-    // Input interpolation buffer (for downsampling to effect rate)
-    InputInterpBuffer inputBuffer;
+    // Schematic-derived models (MIDIVerb / MIDIFex)
+    analog::Chain<4> inputModel;
+    analog::Chain<2> outputModelL, outputModelR;
 
-    // Output interpolation buffers (effect outputs stereo)
-    OutputInterpBuffer outputBufferL;
-    OutputInterpBuffer outputBufferR;
+    // Generic filters for units without a model (MIDIVerb II)
+    LowpassFilter8 genericInput, genericOutputL, genericOutputR;
 
-    // Reconstruction filters (after upsampling) - stereo
-    LowpassFilter8 reconstructFilterL;
-    LowpassFilter8 reconstructFilterR;
+    // Decimation internal -> host
+    LowpassFilter8 decimateL, decimateR;
 
     // Input overload detection
     std::atomic<bool> inputOverload{false};
