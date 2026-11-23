@@ -181,6 +181,10 @@ private:
     double lastWetL = 0.0;
     double lastWetR = 0.0;
 
+    // Input drive into the ADC and output trim on the wet signal (linear, smoothed)
+    juce::SmoothedValue<float> inputGainSmoothed { 1.0f };
+    juce::SmoothedValue<float> outputGainSmoothed { 1.0f };
+
     // Resampling state. Audio runs at an oversampled internal rate (host rate x
     // oversampling) where the analog filters are modelled; the DSP is sampled
     // from it at the original unit's rate and its output held like the real DAC.

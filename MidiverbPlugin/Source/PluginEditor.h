@@ -57,8 +57,9 @@ private:
     MidiverbAudioProcessor& processor;
     UnitKnobLookAndFeel knobLook;
 
-    juce::Slider mixKnob, feedbackKnob;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> mixAttachment, feedbackAttachment;
+    juce::Slider mixKnob, feedbackKnob, inputKnob, outputKnob;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> mixAttachment, feedbackAttachment,
+                                                                          inputAttachment, outputAttachment;
 
     std::vector<Hit> hits;
     Hit pressedCopy {};

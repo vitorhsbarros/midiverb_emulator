@@ -80,6 +80,20 @@ juce::AudioProcessorValueTreeState::ParameterLayout MidiverbAudioProcessor::crea
         juce::ParameterID{"feedback", 1}, "Feedback",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.0f));
 
+    // The original units had an input level knob: drive the converter close to
+    // clipping to use all of its 12/13 bits. Output trim compensates the wet level.
+    auto dbAttributes = juce::AudioParameterFloatAttributes()
+        .withLabel("dB")
+        .withStringFromValueFunction([](float v, int) { return juce::String(v, 1) + " dB"; });
+
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"inputGain", 1}, "Input Gain",
+        juce::NormalisableRange<float>(-24.0f, 24.0f, 0.1f), 0.0f, dbAttributes));
+
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{"outputGain", 1}, "Output Trim",
+        juce::NormalisableRange<float>(-24.0f, 24.0f, 0.1f), 0.0f, dbAttributes));
+
     return { params.begin(), params.end() };
 }
 
@@ -134,6 +148,13 @@ void MidiverbAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBloc
     decimateL.setCutoff(internalRate, decimationCutoff);
     interpolateIn.setCutoff(internalRate, decimationCutoff);
     decimateR.setCutoff(internalRate, decimationCutoff);
+
+    inputGainSmoothed.reset(sampleRate, 0.02);
+    outputGainSmoothed.reset(sampleRate, 0.02);
+    inputGainSmoothed.setCurrentAndTargetValue(
+        juce::Decibels::decibelsToGain(apvts.getRawParameterValue("inputGain")->load()));
+    outputGainSmoothed.setCurrentAndTargetValue(
+        juce::Decibels::decibelsToGain(apvts.getRawParameterValue("outputGain")->load()));
 
     resetSignalState();
 }
@@ -196,6 +217,8 @@ void MidiverbAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
     int effectIndex = static_cast<int>(*apvts.getRawParameterValue("program"));
     float dryWet = *apvts.getRawParameterValue("dryWet");
     float feedback = *apvts.getRawParameterValue("feedback");
+    inputGainSmoothed.setTargetValue(juce::Decibels::decibelsToGain(apvts.getRawParameterValue("inputGain")->load()));
+    outputGainSmoothed.setTargetValue(juce::Decibels::decibelsToGain(apvts.getRawParameterValue("outputGain")->load()));
 
     // Clamp effect index to valid range for current device
     const auto& dev = devices[deviceIndex];
@@ -251,8 +274,13 @@ void MidiverbAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
         float dryL = leftChannel[i];
         float dryR = rightChannel[i];
 
-        // Mono sum (the units sum L+R before the ADC), plus optional feedback
-        const double monoIn = (dryL + dryR) * 0.5 + (lastWetL + lastWetR) * 0.5 * feedback;
+        const double inputGain = inputGainSmoothed.getNextValue();
+        const double outputGain = outputGainSmoothed.getNextValue();
+
+        // Mono sum (the units sum L+R before the ADC), plus optional feedback.
+        // Input gain only drives the converter (the dry signal is untouched) and is
+        // applied before the feedback sum, so it doesn't change the loop gain.
+        const double monoIn = (dryL + dryR) * 0.5 * inputGain + (lastWetL + lastWetR) * 0.5 * feedback;
 
         double wetL = 0.0, wetR = 0.0;
         for (int k = 1; k <= oversampling; ++k)
@@ -338,9 +366,11 @@ void MidiverbAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
             wetR = yR;
         }
 
-        // Store for feedback
+        // Store for feedback (before the output trim, as on the unit)
         lastWetL = wetL;
         lastWetR = wetR;
+        wetL *= outputGain;
+        wetR *= outputGain;
 
         // Dry/wet mix
         leftChannel[i] = static_cast<float>(dryL * equalPowerDry + wetL * equalPowerWet);
