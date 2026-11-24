@@ -31,7 +31,7 @@ juce_add_plugin(MidiverbPlugin
     PLUGIN_MANUFACTURER_CODE Mdvb
     PLUGIN_CODE Mvb1
     FORMATS AU VST3 Standalone
-    PRODUCT_NAME "Midiverb Emulator"
+    PRODUCT_NAME "VT Reverb Midiverb"
 )
 
 target_sources(MidiverbPlugin

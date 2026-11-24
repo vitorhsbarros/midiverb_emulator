@@ -326,11 +326,12 @@ void UnitPanel::layout()
             hits.push_back({ { 690.0f + 42.0f * (float) (k % 5), (k < 5 ? 506.0f : 546.0f), 34.0f, 28.0f },
                              HitType::Key, k });
 
-        // Right of the wordmark box (x <= 276), left of the clip LED (x ~ 505)
-        inputKnob.setBounds(292, 516, 46, 46);
-        mixKnob.setBounds(342, 516, 46, 46);
-        feedbackKnob.setBounds(392, 516, 46, 46);
-        outputKnob.setBounds(442, 516, 46, 46);
+        // Right of the wordmark box (x <= 276), left of the clip LED (x ~ 505).
+        // Knobs with their labels are centred vertically on the display (y 508..570).
+        inputKnob.setBounds(292, 523, 46, 46);
+        mixKnob.setBounds(342, 523, 46, 46);
+        feedbackKnob.setBounds(392, 523, 46, 46);
+        outputKnob.setBounds(442, 523, 46, 46);
     }
     else
     {
@@ -457,7 +458,7 @@ void UnitPanel::paint(juce::Graphics& g)
 
 void UnitPanel::paintTabs(juce::Graphics& g)
 {
-    static const char* labels[] = { "MIDIVERB", "MIDIFEX", "MIDIVERB II" };
+    static const char* labels[] = { "MIDIVERB", "MIDIFEX", "VITIVERB II" };
     for (const auto& h : hits)
     {
         if (h.type != HitType::Tab) continue;
@@ -795,13 +796,25 @@ void UnitPanel::paintRackUnit(juce::Graphics& g)
                              .translated(brandLeft, baselineY));
     };
 
-    auto word = slantedText("MIDIVERB", 40.0f, 0.24f);
+    auto word = slantedText("VITIVERB", 40.0f, 0.24f);
     auto numeral = slantedText("II", 40.0f, 0.24f);
     numeral.applyTransform(juce::AffineTransform::translation(word.getBounds().getRight() + 6.0f, 0.0f));
     juce::Path brand(word);
     brand.addPath(numeral);
-    const float wordBaseline = 552.0f;
-    fitToBrandBox(brand, wordBaseline);
+    fitToBrandBox(brand, 552.0f);
+    auto sub = slantedText("16 BIT DIGITAL EFFECTS PROCESSOR", 11.0f, 0.2f);
+    fitToBrandBox(sub, 570.0f);
+
+    // Centre the two lines (wordmark top to subtitle underline) on the display's
+    // centre line, which the knobs are centred on too.
+    constexpr float rowCentreY = 539.0f;   // display: y 508..570
+    const float blockTop = brand.getBounds().getY();
+    const float blockBottom = 576.0f + 1.0f;   // underline below the subtitle
+    const float shiftY = rowCentreY - (blockTop + blockBottom) * 0.5f;
+    brand.applyTransform(juce::AffineTransform::translation(0.0f, shiftY));
+    sub.applyTransform(juce::AffineTransform::translation(0.0f, shiftY));
+    const float wordBaseline = 552.0f + shiftY;
+
     const auto brandBounds = brand.getBounds();
     g.setGradientFill(juce::ColourGradient(verb2Blue.brighter(0.5f), 0.0f, brandBounds.getY(),
                                            verb2Blue.darker(0.2f), 0.0f, wordBaseline, false));
@@ -809,11 +822,9 @@ void UnitPanel::paintRackUnit(juce::Graphics& g)
     g.setColour(verb2Blue.brighter(0.8f).withAlpha(0.7f));
     g.strokePath(brand, juce::PathStrokeType(0.8f));
 
-    auto sub = slantedText("16 BIT DIGITAL EFFECTS PROCESSOR", 11.0f, 0.2f);
-    fitToBrandBox(sub, 570.0f);
     g.setColour(verb2Blue);
     g.fillPath(sub);
-    g.fillRect(brandLeft, 576.0f, sub.getBounds().getWidth() + 4.0f, 1.0f);
+    g.fillRect(brandLeft, 576.0f + shiftY, sub.getBounds().getWidth() + 4.0f, 1.0f);
 
     // Knobs
     paintKnobLabel(g, inputKnob, "INPUT", printWhite, true);
