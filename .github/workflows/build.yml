@@ -9,7 +9,7 @@ on:
 
 jobs:
   build-macos:
-    runs-on: macos-latest
+    runs-on: macos-15-intel  # Intel runner: Apple Silicon queue often has no capacity; still builds a universal binary
     steps:
       - name: Checkout
         uses: actions/checkout@v4
