@@ -275,10 +275,16 @@ void UnitPanel::refresh(bool overload)
     bool needsRepaint = false;
     if (device != shownDevice)
     {
+        const int oldHeight = currentLogicalHeight();
         shownDevice = device;
         pendingDigit = -1;
         layout();
         needsRepaint = true;
+        if (currentLogicalHeight() != oldHeight)
+        {
+            setSize(logicalWidth, currentLogicalHeight());
+            if (onHeightChanged) onHeightChanged();
+        }
     }
     if (program != shownProgram) { shownProgram = program; needsRepaint = true; }
     const auto now = juce::Time::getMillisecondCounter();
@@ -311,6 +317,7 @@ void UnitPanel::layout()
 
     for (int d = 0; d < MidiverbAudioProcessor::NUM_DEVICES; ++d)
         hits.push_back({ { 30.0f + 150.0f * (float) d, 10.0f, 144.0f, 28.0f }, HitType::Tab, d });
+    hits.push_back({ { 770.0f, 10.0f, 160.0f, 28.0f }, HitType::Collapse, 0 });
 
     const int device = shownDevice;
     if (device == MIDIVERB2)
@@ -349,10 +356,17 @@ void UnitPanel::layout()
         feedbackKnob.setBounds(664, 522, 60, 60);
         outputKnob.setBounds(746, 522, 60, 60);
     }
+
+    // All knobs sit below the collapsible band
+    if (collapsed)
+        for (auto* k : { &inputKnob, &mixKnob, &feedbackKnob, &outputKnob })
+            k->setTopLeftPosition(k->getX(), k->getY() - juce::roundToInt(collapseShift()));
 }
 
 const UnitPanel::Hit* UnitPanel::hitAt(juce::Point<float> p) const
 {
+    if (collapsed && p.y >= cutFor(shownDevice).start)
+        p.y += collapseShift();   // back to full-size coordinates
     for (const auto& h : hits)
         if (h.area.contains(p))
             return &h;
@@ -383,6 +397,9 @@ void UnitPanel::mouseDown(const juce::MouseEvent& e)
 
     switch (h->type)
     {
+        case HitType::Collapse:
+            setCollapsed(! collapsed);
+            return;
         case HitType::Tab:
             if (h->value != currentDevice())
             {
@@ -443,10 +460,69 @@ juce::String UnitPanel::displayText() const
     return juce::String(shownProgram + 1).paddedLeft(' ', 2);
 }
 
+// Vertical band (in full-size coordinates) removed when the program chart is
+// collapsed: everything below it moves up by (end - start).
+UnitPanel::Cut UnitPanel::cutFor(int device) const
+{
+    if (device == MIDIVERB2)
+        return { 46.0f, 458.0f };    // the lid with the program list
+    return { 156.0f, 490.0f };       // the chart printed on the lid, below the wordmark
+}
+
+float UnitPanel::collapseShift() const
+{
+    if (! collapsed) return 0.0f;
+    const auto c = cutFor(shownDevice);
+    return c.end - c.start;
+}
+
+int UnitPanel::currentLogicalHeight() const
+{
+    return logicalHeight - juce::roundToInt(collapseShift());
+}
+
+void UnitPanel::setCollapsed(bool shouldCollapse)
+{
+    if (collapsed == shouldCollapse) return;
+    collapsed = shouldCollapse;
+    layout();
+    setSize(logicalWidth, currentLogicalHeight());
+    repaint();
+    if (onHeightChanged) onHeightChanged();
+}
+
 void UnitPanel::paint(juce::Graphics& g)
 {
+    if (! collapsed)
+    {
+        paintContent(g);
+        return;
+    }
+    const auto cut = cutFor(shownDevice);
+    const float shift = cut.end - cut.start;
+    // Background once over the visible height, so its shading has no seam
     g.setGradientFill(juce::ColourGradient(studioTop, 0.0f, 0.0f, studioBot, 0.0f, (float) getHeight(), false));
     g.fillAll();
+    {
+        juce::Graphics::ScopedSaveState s(g);
+        g.reduceClipRegion(0, 0, logicalWidth, (int) cut.start);
+        paintContent(g);
+    }
+    {
+        juce::Graphics::ScopedSaveState s(g);
+        g.reduceClipRegion(0, (int) cut.start, logicalWidth, logicalHeight);
+        g.addTransform(juce::AffineTransform::translation(0.0f, -shift));
+        paintContent(g);
+    }
+}
+
+void UnitPanel::paintContent(juce::Graphics& g)
+{
+    if (! collapsed)
+    {
+        g.setGradientFill(juce::ColourGradient(studioTop, 0.0f, 0.0f, studioBot, 0.0f, (float) logicalHeight, false));
+        g.fillAll();
+    }
 
     paintTabs(g);
 
@@ -483,7 +559,32 @@ void UnitPanel::paintTabs(juce::Graphics& g)
 
     g.setColour(printGrey.withAlpha(0.6f));
     g.setFont(font(11.0f));
-    g.drawText("DASP EMULATOR", Rectangle<float>(760.0f, 10.0f, 170.0f, 28.0f), juce::Justification::centredRight);
+    g.drawText("DASP EMULATOR", Rectangle<float>(560.0f, 10.0f, 190.0f, 28.0f), juce::Justification::centredRight);
+
+    // Program chart show/hide toggle
+    for (const auto& h : hits)
+    {
+        if (h.type != HitType::Collapse) continue;
+        auto r = h.area;
+        const bool down = isPressed(HitType::Collapse);
+        g.setColour(down ? Colour(0xff28282b) : Colour(0xff151517));
+        g.fillRoundedRectangle(r, 4.0f);
+        g.setColour(Colour(0xff2e2e31));
+        g.drawRoundedRectangle(r.reduced(0.5f), 4.0f, 1.0f);
+
+        // Triangle: pointing down = chart hidden (click to show), up = chart shown
+        juce::Path tri;
+        const float cx = r.getX() + 18.0f, cy = r.getCentreY();
+        if (collapsed) tri.addTriangle(cx - 5.0f, cy - 3.0f, cx + 5.0f, cy - 3.0f, cx, cy + 4.0f);
+        else           tri.addTriangle(cx - 5.0f, cy + 3.0f, cx + 5.0f, cy + 3.0f, cx, cy - 4.0f);
+        g.setColour(accentFor(shownDevice));
+        g.fillPath(tri);
+
+        g.setColour(printWhite.withAlpha(0.85f));
+        g.setFont(font(10.5f, true));
+        g.drawText(collapsed ? "SHOW PROGRAMS" : "HIDE PROGRAMS", r.withTrimmedLeft(30.0f).withTrimmedRight(8.0f),
+                   juce::Justification::centredLeft);
+    }
 }
 
 void UnitPanel::paintButton(juce::Graphics& g, Rectangle<float> r, Colour cap, bool pressed)
@@ -553,7 +654,8 @@ void UnitPanel::paintDisplay(juce::Graphics& g, Rectangle<float> r)
 void UnitPanel::paintKnobLabel(juce::Graphics& g, const juce::Slider& knob, const juce::String& text,
                                Colour colour, bool above)
 {
-    auto b = knob.getBounds().toFloat();
+    // Painting happens in full-size coordinates; knob bounds are shifted when collapsed
+    auto b = knob.getBounds().toFloat().translated(0.0f, collapseShift());
     auto r = above ? Rectangle<float>(b.getX() - 20.0f, b.getY() - 14.0f, b.getWidth() + 40.0f, 12.0f)
                    : Rectangle<float>(b.getX() - 20.0f, b.getBottom() + 1.0f, b.getWidth() + 40.0f, 12.0f);
     g.setColour(colour);
@@ -575,9 +677,21 @@ void UnitPanel::paintDesktopUnit(juce::Graphics& g, bool isMidifex)
     const Rectangle<float> body(30.0f, 52.0f, 900.0f, 574.0f);
     g.setColour(juce::Colours::black.withAlpha(0.55f));
     g.fillRoundedRectangle(body.translated(0.0f, 6.0f).expanded(2.0f), 26.0f);
-    g.setGradientFill(juce::ColourGradient(Colour(0xff26262a), body.getX(), body.getY(),
-                                           Colour(0xff101012), body.getX(), body.getBottom(), false));
-    g.fillRoundedRectangle(body, 24.0f);
+    {
+        const Colour top(0xff26262a), bottom(0xff101012);
+        juce::ColourGradient grad(top, body.getX(), body.getY(), bottom, body.getX(), body.getBottom(), false);
+        if (collapsed)
+        {
+            // Hold the shade constant across the cut-out band so the two halves meet cleanly
+            const auto cut = cutFor(shownDevice);
+            const float visibleH = body.getHeight() - (cut.end - cut.start);
+            const auto atCut = top.interpolatedWith(bottom, (cut.start - body.getY()) / visibleH);
+            grad.addColour((cut.start - body.getY()) / body.getHeight(), atCut);
+            grad.addColour((cut.end - body.getY()) / body.getHeight(), atCut);
+        }
+        g.setGradientFill(grad);
+        g.fillRoundedRectangle(body, 24.0f);
+    }
     g.setColour(Colour(0x18ffffff));
     g.drawRoundedRectangle(body.reduced(1.0f), 24.0f, 1.2f);
 
@@ -889,17 +1003,32 @@ void UnitPanel::paintRackUnit(juce::Graphics& g)
 }
 
 //==============================================================================
+// Editor size and chart state are stored as properties of the parameter state,
+// so they are saved with the plugin's settings (and the host project).
+static const juce::Identifier editorWidthId { "editorWidth" };
+static const juce::Identifier chartCollapsedId { "programsCollapsed" };
+
 MidiverbAudioProcessorEditor::MidiverbAudioProcessorEditor(MidiverbAudioProcessor& p)
     : AudioProcessorEditor(&p), audioProcessor(p), panel(p)
 {
     addAndMakeVisible(panel);
 
+    auto& state = audioProcessor.getAPVTS().state;
+    panel.setCollapsed((bool) state.getProperty(chartCollapsedId, false));
+    panel.onHeightChanged = [this]
+    {
+        audioProcessor.getAPVTS().state.setProperty(chartCollapsedId, panel.isCollapsed(), nullptr);
+        const int width = getWidth();   // read before new limits can adjust the window
+        applySizeLimits();
+        setSize(width, heightForWidth(width));
+    };
+
     setResizable(true, true);
-    setResizeLimits(UnitPanel::logicalWidth / 2, UnitPanel::logicalHeight / 2,
-                    UnitPanel::logicalWidth * 2, UnitPanel::logicalHeight * 2);
-    if (auto* c = getConstrainer())
-        c->setFixedAspectRatio((double) UnitPanel::logicalWidth / (double) UnitPanel::logicalHeight);
-    setSize(defaultWidth, defaultHeight);
+    applySizeLimits();
+    const int savedWidth = juce::jlimit(UnitPanel::logicalWidth / 2, UnitPanel::logicalWidth * 2,
+                                        (int) state.getProperty(editorWidthId, defaultWidth));
+    setSize(savedWidth, heightForWidth(savedWidth));
+    restoring = false;
 
     startTimerHz(30);
 }
@@ -909,6 +1038,19 @@ MidiverbAudioProcessorEditor::~MidiverbAudioProcessorEditor()
     stopTimer();
 }
 
+int MidiverbAudioProcessorEditor::heightForWidth(int width) const
+{
+    return juce::roundToInt((double) width * panel.currentLogicalHeight() / (double) UnitPanel::logicalWidth);
+}
+
+void MidiverbAudioProcessorEditor::applySizeLimits()
+{
+    const int minW = UnitPanel::logicalWidth / 2, maxW = UnitPanel::logicalWidth * 2;
+    setResizeLimits(minW, heightForWidth(minW), maxW, heightForWidth(maxW));
+    if (auto* c = getConstrainer())
+        c->setFixedAspectRatio((double) UnitPanel::logicalWidth / (double) panel.currentLogicalHeight());
+}
+
 void MidiverbAudioProcessorEditor::paint(juce::Graphics& g)
 {
     g.fillAll(studioBot);
@@ -916,11 +1058,13 @@ void MidiverbAudioProcessorEditor::paint(juce::Graphics& g)
 
 void MidiverbAudioProcessorEditor::resized()
 {
-    const float scale = juce::jmin((float) getWidth() / (float) UnitPanel::logicalWidth,
-                                   (float) getHeight() / (float) UnitPanel::logicalHeight);
+    const float scale = (float) getWidth() / (float) UnitPanel::logicalWidth;
     panel.setTransform({});
-    panel.setBounds(0, 0, UnitPanel::logicalWidth, UnitPanel::logicalHeight);
+    panel.setBounds(0, 0, UnitPanel::logicalWidth, panel.currentLogicalHeight());
     panel.setTransform(juce::AffineTransform::scale(scale));
+
+    if (! restoring)
+        audioProcessor.getAPVTS().state.setProperty(editorWidthId, getWidth(), nullptr);
 }
 
 void MidiverbAudioProcessorEditor::timerCallback()

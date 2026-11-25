@@ -31,8 +31,15 @@ public:
     // Called by the editor's timer.
     void refresh(bool overload);
 
+    // Program chart collapse. When collapsed the chart is cut out of the
+    // drawing and the panel is shorter; the editor resizes to match.
+    bool isCollapsed() const { return collapsed; }
+    void setCollapsed(bool shouldCollapse);
+    int currentLogicalHeight() const;
+    std::function<void()> onHeightChanged;
+
 private:
-    enum class HitType { Tab, Program, Defeat, Up, Down, Key };
+    enum class HitType { Tab, Program, Defeat, Up, Down, Key, Collapse };
     struct Hit { juce::Rectangle<float> area; HitType type; int value; };
 
     int currentDevice() const;
@@ -45,6 +52,10 @@ private:
     const Hit* hitAt(juce::Point<float>) const;
     bool isPressed(HitType, int value = 0) const;
 
+    struct Cut { float start, end; };
+    Cut cutFor(int device) const;
+    float collapseShift() const;
+    void paintContent(juce::Graphics&);
     void paintTabs(juce::Graphics&);
     void paintDesktopUnit(juce::Graphics&, bool isMidifex);
     void paintRackUnit(juce::Graphics&);
@@ -64,6 +75,7 @@ private:
     std::vector<Hit> hits;
     Hit pressedCopy {};
     bool hasPressed = false;
+    bool collapsed = false;
 
     int shownDevice = -1;
     int shownProgram = -1;
@@ -99,9 +111,12 @@ public:
 
 private:
     void timerCallback() override;
+    int heightForWidth(int width) const;
+    void applySizeLimits();
 
     MidiverbAudioProcessor& audioProcessor;
     UnitPanel panel;
+    bool restoring = true;   // don't record sizes set while the editor is being built
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MidiverbAudioProcessorEditor)
 };
