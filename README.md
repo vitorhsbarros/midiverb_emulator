@@ -156,6 +156,24 @@ There is [a plugin using the JUCE library](MidiverbPlugin/) that works very much
 
 There are precompiled binaries in releases.
 
+### Screenshots
+
+**Midiverb**
+
+![Midiverb faceplate](docs/screenshots/midiverb.png)
+
+**Midifex**
+
+![Midifex faceplate](docs/screenshots/midifex.png)
+
+**Vitiverb II** (Midiverb II)
+
+![Vitiverb II faceplate](docs/screenshots/vitiverb2.png)
+
+With the program list hidden (**HIDE PROGRAMS**):
+
+![Vitiverb II with the program list hidden](docs/screenshots/vitiverb2-collapsed.png)
+
 #### Gain staging
 
 The plugin models the units' 12/13-bit converters, so the noise floor is fixed relative to full scale, just like on the hardware. Quiet input (for example a track peaking at -18 dBFS) only uses a few of those bits and sounds hissy and grainy. Turn **INPUT** up until the clip LED just flickers on the loudest peaks, then bring the wet level back down with **OUTPUT** (e.g. +12 dB in, -12 dB out). The dry signal is not affected by either knob.
